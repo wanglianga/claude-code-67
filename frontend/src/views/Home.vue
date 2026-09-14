@@ -38,6 +38,11 @@ const stations = ref([])
 const trucks = ref([])
 const weather = ref({})
 const counts = ref({})
+const myRides = ref([])
+
+// 用户首页仅统计本人行程
+const myOngoing = computed(() => myRides.value.filter(r => r.status === 'ongoing').length)
+const myTotal = computed(() => myRides.value.length)
 
 const greeting = computed(() => {
   const h = new Date().getHours()
@@ -65,8 +70,8 @@ const stats = computed(() => {
     return [
       { label: '押金', value: '¥' + (user.value?.deposit ?? 0), extra: '借车前需缴满 ¥199', color: '#1668dc' },
       { label: '余额', value: '¥' + (user.value?.balance ?? 0), extra: '骑行费用自动扣减', color: '#18a058' },
-      { label: '进行中行程', value: c.ongoing_rides ?? '-', extra: '还车后自动计费', color: '#7c3aed' },
-      { label: '账户状态', value: user.value?.restricted ? '受限' : '正常', extra: user.value?.restricted ? '请联系客服解除' : '可正常借还车', color: user.value?.restricted ? '#d03050' : '#18a058' },
+      { label: '我的进行中行程', value: myOngoing.value, extra: myOngoing.value ? '还车后自动计费' : '当前无进行中行程', color: '#7c3aed' },
+      { label: '我的累计行程', value: myTotal.value, extra: user.value?.restricted ? '账户受限，请联系客服' : '账户状态正常', color: user.value?.restricted ? '#d03050' : '#1668dc' },
     ]
   }
   return [
@@ -104,5 +109,11 @@ onMounted(async () => {
     weather.value = d.weather_alert || {}
     counts.value = d
   } catch (e) { /* 首页静默失败 */ }
+  // 用户角色：拉取本人行程用于首页统计（不用全平台数据）
+  if (!isStaff.value) {
+    try {
+      myRides.value = await get('/rides/my')
+    } catch (e) { /* 静默 */ }
+  }
 })
 </script>

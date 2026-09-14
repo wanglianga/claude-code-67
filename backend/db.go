@@ -18,7 +18,7 @@ func initDB() {
 	user := getenv("DB_USER", "bike")
 	pass := getenv("DB_PASSWORD", "bike123")
 	name := getenv("DB_NAME", "bikedb")
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable timezone=Asia/Shanghai",
 		host, port, user, pass, name)
 
 	var err error

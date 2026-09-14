@@ -18,10 +18,11 @@
           <label>还车站点</label>
           <select class="input" v-model.number="ret.station_id">
             <option :value="0" disabled>请选择还车站点</option>
-            <option v-for="s in stations" :key="s.id" :value="s.id" :disabled="s.free_docks === 0">
-              {{ s.name }}（空桩 {{ s.free_docks }}）
+            <option v-for="s in stations" :key="s.id" :value="s.id">
+              {{ s.name }}（空桩 {{ s.free_docks }}）{{ s.free_docks === 0 ? '·已满桩' : '' }}
             </option>
           </select>
+          <div class="small muted" style="margin-top:4px">满桩站点也可尝试还车，系统将引导您发起「无法还车」协同处理</div>
         </div>
         <div class="form-item">
           <label>当前位置（还车记录）</label>
@@ -53,6 +54,7 @@
       <div v-if="fullErr" class="alert warn mt">
         ⚠ {{ fullErr }}
         <button class="btn sm" style="margin-left:10px" @click="createCannotReturn">发起「无法还车」协同处理</button>
+        <div class="small" style="margin-top:6px">发起后行程与位置信息将自动带入事件，客服/调度员/站点管理员会协同处理</div>
       </div>
     </div>
 
@@ -151,6 +153,7 @@ const rides = ref([])
 const weather = ref({})
 const busy = ref(false)
 const fullErr = ref('')
+const fullStationId = ref(0)
 const borrowWarning = ref('')
 const borrow = ref({ station_id: 0, bike_code: '' })
 const ret = ref({ station_id: 0, location: '', fault_type: '', fault_feedback: '' })
@@ -206,7 +209,9 @@ async function doReturn() {
     await loadAll()
   } catch (e) {
     if (e.status === 409 && e.data?.error === 'station_full') {
+      // 保留位置与行程上下文，引导发起协同事件
       fullErr.value = e.data.message
+      fullStationId.value = e.data.station_id || ret.value.station_id
     } else {
       toast(e.message, true)
     }
@@ -214,12 +219,18 @@ async function doReturn() {
 }
 
 async function createCannotReturn() {
+  const stationId = fullStationId.value || ret.value.station_id
+  const stationName = (stations.value.find(s => s.id === stationId) || {}).name || ''
   try {
     const res = await post('/events', {
       type: 'cannot_return',
-      station_id: ret.value.station_id,
+      station_id: stationId,
       ride_id: ongoing.value.id,
-      title: '用户到站无法还车（满桩）',
+      title: `用户到站无法还车（${stationName}满桩）`,
+    })
+    // 把行程与位置上下文写入事件时间线，便于客服/调度/站管核实
+    await post(`/events/${res.event_id}/messages`, {
+      content: `行程 #${ongoing.value.id}（车辆 ${ongoing.value.bike_code}，借自 ${ongoing.value.from_station}）；用户当前位置：${ret.value.location || '未填写'}；还车目标站点：${stationName}（满桩）。`,
     })
     toast('已创建协同事件，客服/调度/站管已加入')
     router.push('/events/' + res.event_id)

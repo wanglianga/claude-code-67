@@ -117,7 +117,8 @@ func rebalancePlanHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	if req.TruckCapacity <= 0 {
 		db.QueryRow(`SELECT COALESCE(MIN(capacity),20) FROM trucks WHERE status='idle'`).Scan(&req.TruckCapacity)
 	}
-	hour := time.Now().Hour()
+	// 统一按 Asia/Shanghai 判断地铁早高峰 / 学校放学 / 商圈活动时段
+	hour := hourCN()
 
 	rows, err := db.Query(`
 		SELECT s.id, s.name, s.type, s.capacity,

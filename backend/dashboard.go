@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"net/http"
-	"time"
 )
 
 // dashboardHandler 运营实时总览：满桩/空桩/故障/调拨车/高峰需求/地铁客流/事件。
@@ -86,8 +85,8 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request, _ *User) {
 			}
 		}
 	}
-	// 叠加需求预测（未来 3 小时）
-	hour := time.Now().Hour()
+	// 叠加需求预测（未来 3 小时，按 Asia/Shanghai 时段）
+	hour := hourCN()
 	forecast := []map[string]any{}
 	frows, err := db.Query(`SELECT hour, sum(borrow_need), sum(return_need) FROM demand_profiles
 		WHERE hour BETWEEN $1 AND $2 GROUP BY hour ORDER BY hour`, hour, hour+3)

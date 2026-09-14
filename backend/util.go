@@ -35,6 +35,21 @@ var roleNames = map[string]string{
 	"driver":        "调拨车司机",
 }
 
+// locCN 统一按 Asia/Shanghai 计算运营时段（早高峰/放学/商圈/预测），
+// 与容器 UTC 解耦；tzdata 缺失时回退到固定 +8 区。
+var locCN = func() *time.Location {
+	l, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*3600)
+	}
+	return l
+}()
+
+// hourCN 返回当前 Asia/Shanghai 小时（0-23）。
+func hourCN() int {
+	return time.Now().In(locCN).Hour()
+}
+
 var staffRoles = map[string]bool{
 	"cs": true, "dispatcher": true, "repair": true,
 	"station_admin": true, "operator": true, "city": true, "driver": true,
