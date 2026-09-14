@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-bike}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bike123}
+      POSTGRES_DB: ${DB_NAME:-bikedb}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 数据库不发布到宿主端口，仅在 compose 内部网络访问
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-bike}
+      DB_PASSWORD: ${DB_PASSWORD:-bike123}
+      DB_NAME: ${DB_NAME:-bikedb}
+      PORT: "8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${CC_PUBLISH_PORT}:8080"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
