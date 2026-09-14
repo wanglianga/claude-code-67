@@ -43,6 +43,7 @@ const MENUS = [
   { path: '/dashboard', title: '实时运营看板', icon: '📊', roles: 'staff' },
   { path: '/events', title: '协同事件', icon: '🚨', roles: 'all' },
   { path: '/rebalance', title: '调拨中心', icon: '🚚', roles: ['dispatcher', 'operator', 'city', 'cs'] },
+  { path: '/peak-routes', title: '高峰调拨路线', icon: '🗺️', roles: ['dispatcher', 'operator', 'city', 'cs'] },
   { path: '/maintenance', title: '维修与车辆档案', icon: '🔧', roles: ['repair', 'operator', 'dispatcher'] },
   { path: '/appeals', title: '申诉处理', icon: '📝', roles: 'all' },
   { path: '/stations', title: '站点与调整分析', icon: '📍', roles: ['operator', 'station_admin', 'city', 'dispatcher'] },

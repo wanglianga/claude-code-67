@@ -66,6 +66,7 @@ func seed() (err error) {
 	addUser("driver1", "周师傅", "driver", 0, 0, "active", false)
 	addUser("driver2", "吴师傅", "driver", 0, 0, "active", false)
 	addUser("driver3", "郑师傅", "driver", 0, 0, "active", false)
+	addUser("driver4", "马师傅", "driver", 0, 0, "active", false)
 	// 流失用户（30 天前最后骑行，用于站点调整分析）
 	oldUsers := []int64{}
 	for i := 1; i <= 8; i++ {
@@ -100,9 +101,10 @@ func seed() (err error) {
 
 	// ---------- bikes & docks ----------
 	// 每站健康在桩车辆数（ST04 接近满桩，ST01/ST06 接近空桩）
-	// 健康在桩 3+5+4+27+5+2+2+2 = 50；故障在桩 2（ST04、ST02 各1）；
-	// 另：租用3、维修中2、调拨在途2、清洗1、报废1 → 共 61 辆
-	dockedCounts := []int{3, 5, 4, 27, 5, 2, 2, 2}
+	// 健康在桩 3+5+4+27+8+2+2+2 = 53；故障在桩 2（ST04、ST02 各1）；
+	// 另：租用3、维修中2、普通调拨在途2、早高峰路线已从 ST05 装车在途10、清洗1、报废1 → 共 74 辆
+	// ST05 滨江社区 8/18：早高峰前原 18 桩全满（住宅区还车积压），高峰路线已装车 10 辆运出
+	dockedCounts := []int{3, 5, 4, 27, 8, 2, 2, 2}
 	bikeNo := 0
 	newBike := func(status string, stationID any) int64 {
 		bikeNo++
@@ -130,9 +132,14 @@ func seed() (err error) {
 	// 维修中 2 辆
 	bkRepair1 := newBike("in_repair", nil)
 	bkRepair2 := newBike("in_repair", nil)
-	// 调拨在途 2 辆（在调拨车 苏A·D1003 上）
+	// 调拨在途 2 辆（在调拨车 苏A·D1003 上，任务 task3）
 	newBike("in_transit", nil)
 	newBike("in_transit", nil)
+	// 早高峰调拨路线 R1 在途：从滨江社区装车 10 辆（已在去 ST01 路上），由 tr? 承运
+	route1Bikes := []int64{}
+	for i := 0; i < 10; i++ {
+		route1Bikes = append(route1Bikes, newBike("in_transit", nil))
+	}
 	// 清洗 1 辆
 	bkCleaning := newBike("cleaning", stID[6])
 	// 报废 1 辆
@@ -247,12 +254,17 @@ func seed() (err error) {
 		VALUES('苏A·D1002',24,'idle',$1,60,50) RETURNING id`, uid["driver2"])
 	tr3 := one(`INSERT INTO trucks(plate,capacity,status,driver_id,location_x,location_y)
 		VALUES('苏A·D1003',20,'en_route',$1,55,70) RETURNING id`, uid["driver3"])
+	// 早高峰调拨路线专用车（执行中，已抵达地铁文化广场站等待卸车）
+	tr4 := one(`INSERT INTO trucks(plate,capacity,status,driver_id,location_x,location_y)
+		VALUES('苏A·D1004',24,'en_route',$1,18,22) RETURNING id`, uid["driver4"])
 	ex(`INSERT INTO driver_shifts(driver_id,shift_date,start_time,end_time,truck_id,status)
 		VALUES($1,CURRENT_DATE,'06:30','14:30',$2,'active')`, uid["driver1"], tr1)
 	ex(`INSERT INTO driver_shifts(driver_id,shift_date,start_time,end_time,truck_id,status)
 		VALUES($1,CURRENT_DATE,'14:30','22:30',$2,'scheduled')`, uid["driver2"], tr2)
 	ex(`INSERT INTO driver_shifts(driver_id,shift_date,start_time,end_time,truck_id,status)
 		VALUES($1,CURRENT_DATE,'06:30','14:30',$2,'active')`, uid["driver3"], tr3)
+	ex(`INSERT INTO driver_shifts(driver_id,shift_date,start_time,end_time,truck_id,status)
+		VALUES($1,CURRENT_DATE,'05:50','13:50',$2,'active')`, uid["driver4"], tr4)
 
 	// ---------- rebalance tasks ----------
 	ex(`INSERT INTO rebalance_tasks(from_station_id,to_station_id,bike_count,truck_id,driver_id,status,reason,explanation,factors,cost,created_by,created_at,completed_at)
@@ -438,8 +450,15 @@ func seed() (err error) {
 					borrow = 6
 				}
 			case "residential":
+				// 早高峰前住宅区还车积压（夜间/清晨陆续还回、桩位堆积）→ 需装车调往地铁口
+				if h == 6 {
+					ret = 8
+				}
+				if h >= 7 && h <= 8 {
+					ret = 10
+				}
 				if h >= 7 && h <= 9 {
-					borrow = 8
+					borrow = 6
 				}
 				if h >= 18 && h <= 20 {
 					ret = 10
@@ -454,6 +473,69 @@ func seed() (err error) {
 	ex(`INSERT INTO station_adjustments(station_id,action,detail,operator_id,created_at)
 		VALUES($1,'capacity_expand','桩位 22 → 28，应对商圈周末满桩投诉（近 30 天满桩投诉 3 起）',$2,now()-interval '30 days')`,
 		stID[3], uid["ops1"])
+
+	// ---------- 高峰天气（路线复盘关联）----------
+	ex(`INSERT INTO peak_weather(peak_date,peak_type,condition,temp_c,wind_level,alert_level,summary)
+		VALUES(CURRENT_DATE-1,'morning','中雨',21,'东北风3级','黄色','早高峰有阵雨，路面湿滑，部分主干道通行缓慢')`)
+	ex(`INSERT INTO peak_weather(peak_date,peak_type,condition,temp_c,wind_level,alert_level,summary)
+		VALUES(CURRENT_DATE,'morning','多云',24,'东风2级','无','今日早高峰天气良好，无预警')`)
+
+	// ---------- 早高峰调拨路线 ----------
+	// R1：执行中。滨江社区（装车10）→ 地铁文化广场（卸6）→ 地铁东站南口（卸4）。
+	// 当前已装车完成并抵达第 2 站（ST01），等待调度员登记卸车；该到达晚于计划 6 分钟，待补充偏离原因。
+	pr1 := one(`INSERT INTO peak_routes(code,name,peak_type,scheduled_start,status,truck_id,driver_id,
+		capacity,total_load,subway_borrow_need,residential_backlog,onboard,current_seq,
+		explanation,factors,created_by,started_at)
+		VALUES('PR-0650','早高峰社区→地铁口补车路线','morning',
+		now()-interval '40 minutes','executing',$1,$2,24,10,30,16,10,2,
+		'早高峰前生成：地铁文化广场站 7 点取车需求 14 辆、在桩仅 3 辆，地铁东站南口取车需求 14 辆、在桩 5 辆；滨江社区还车积压。按调拨车容量 24 辆，从滨江社区装车 10 辆，先补文化广场 6 辆、再补东站南口 4 辆。',
+		'{"peak_type":"morning","truck_capacity":24,"need_hour":7,"buffer_minutes":3}',$3,
+		now()-interval '35 minutes') RETURNING id`,
+		tr4, uid["driver4"], uid["disp1"])
+	pr1s1 := one(`INSERT INTO route_stops(route_id,seq,station_id,kind,planned_load,actual_load,eta,actual_arrival,status)
+		VALUES($1,1,$2,'pickup',10,10,now()-interval '34 minutes',now()-interval '33 minutes','done') RETURNING id`,
+		pr1, stID[4])
+	one(`INSERT INTO route_stops(route_id,seq,station_id,kind,planned_load,eta,actual_arrival,status,deviated,deviation_type,impact)
+		VALUES($1,2,$2,'dropoff',6,now()-interval '16 minutes',now()-interval '10 minutes','arrived',
+		TRUE,'late','晚点 6 分钟到达，后续地铁东站南口补车顺延，早高峰缺车窗口扩大。') RETURNING id`,
+		pr1, stID[0])
+	one(`INSERT INTO route_stops(route_id,seq,station_id,kind,planned_load,eta,status)
+		VALUES($1,3,$2,'dropoff',4,now()+interval '7 minutes','pending') RETURNING id`,
+		pr1, stID[1])
+	for _, b := range route1Bikes {
+		ex(`INSERT INTO route_bikes(route_id,bike_id,loaded_stop_id,status) VALUES($1,$2,$3,'onboard')`,
+			pr1, b, pr1s1)
+	}
+
+	// R0：昨日已完成并复盘的路线，含一次道路拥堵豁免（验证“拥堵补充原因→免考核→进入复盘→优化下次路线”）。
+	pr0 := one(`INSERT INTO peak_routes(code,name,peak_type,plan_date,scheduled_start,status,truck_id,driver_id,
+		capacity,total_load,subway_borrow_need,residential_backlog,onboard,current_seq,
+		explanation,factors,created_by,started_at,completed_at)
+		VALUES('PR-Y0650','早高峰社区→地铁口补车路线','morning',CURRENT_DATE-1,
+		now()-interval '25 hours','completed',$1,$2,30,12,28,15,0,3,
+		'昨日早高峰：地铁口取车需求合计约 28 辆，从滨江社区、中心医院站装车 12 辆，分补两个地铁口。',
+		'{"peak_type":"morning","truck_capacity":30,"need_hour":7,"buffer_minutes":0}',$3,
+		now()-interval '24 hours 35 minutes',now()-interval '23 hours 55 minutes') RETURNING id`,
+		tr1, uid["driver1"], uid["disp1"])
+	one(`INSERT INTO route_stops(route_id,seq,station_id,kind,planned_load,actual_load,eta,actual_arrival,status)
+		VALUES($1,1,$2,'pickup',8,8,now()-interval '24 hours 34 minutes',now()-interval '24 hours 33 minutes','done') RETURNING id`,
+		pr0, stID[4])
+	one(`INSERT INTO route_stops(route_id,seq,station_id,kind,planned_load,actual_load,eta,actual_arrival,status,
+		deviated,deviation_type,deviation_reason,exemption,impact)
+		VALUES($1,2,$2,'dropoff',6,6,now()-interval '24 hours 16 minutes',now()-interval '24 hours 2 minutes','done',
+		TRUE,'late','江东大道早高峰道路拥堵，排队通过一个信号灯用了 12 分钟',TRUE,
+		'晚点 14 分钟到达，地铁文化广场补车顺延，早高峰缺车约 14 分钟。') RETURNING id`, pr0, stID[0])
+	one(`INSERT INTO route_stops(route_id,seq,station_id,kind,planned_load,actual_load,eta,actual_arrival,status)
+		VALUES($1,3,$2,'dropoff',6,6,now()-interval '23 hours 59 minutes',now()-interval '23 hours 56 minutes','done') RETURNING id`,
+		pr0, stID[1])
+	w0 := one(`INSERT INTO peak_weather(peak_date,peak_type,condition,temp_c,wind_level,alert_level,summary)
+		VALUES(CURRENT_DATE-1,'morning','中雨',21,'东北风3级','黄色','早高峰阵雨，主干道通行缓慢')
+		ON CONFLICT (peak_date,peak_type) DO UPDATE SET condition=EXCLUDED.condition RETURNING id`)
+	ex(`INSERT INTO route_reviews(route_id,weather_id,on_time_rate,deviation_count,exempt_count,driver_assessment,
+		planned_total,actual_total,shortage,causes,improvement,reviewer_id)
+		VALUES($1,$2,0.67,1,1,'exempt',12,12,0,'["congestion","late"]',
+		'下一次高峰路线提前 10 分钟发车、预留拥堵缓冲，并优先选择非主干道的社区—地铁接驳通道；结合黄色降雨预警同步提前。',$3)`,
+		pr0, w0, uid["disp1"])
 
 	return tx.Commit()
 }

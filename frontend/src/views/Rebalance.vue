@@ -5,7 +5,10 @@
         <div class="page-title">调拨中心</div>
         <div class="page-sub">策略因子：地铁早高峰 · 学校放学 · 商圈活动 · 维修车比例 · 调拨车容量；每个调度动作均可解释</div>
       </div>
-      <button v-if="canPlan" class="btn" @click="showPlan = true">＋ 生成调拨计划</button>
+      <div class="flex" style="gap:8px">
+        <button class="btn ghost" @click="$router.push('/peak-routes')">🗺️ 高峰调拨路线</button>
+        <button v-if="canPlan" class="btn" @click="showPlan = true">＋ 生成调拨计划</button>
+      </div>
     </div>
 
     <!-- 调拨车状态 -->

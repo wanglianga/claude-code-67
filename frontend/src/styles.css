@@ -88,6 +88,8 @@ a { color: var(--brand); text-decoration: none; }
 .badge.info { background: #e8f1fd; color: var(--brand); }
 .badge.purple { background: #f1eafd; color: var(--purple); }
 .badge.gray { background: #eef1f6; color: var(--ink-2); }
+.txt-danger { color: var(--danger); }
+.ok-green { color: var(--ok); }
 
 /* ---------- table ---------- */
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }

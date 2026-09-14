@@ -57,6 +57,21 @@ func main() {
 	handle(mux, "POST /api/rebalance/tasks/{id}/status", rebalanceStatusHandler, "dispatcher", "operator")
 	handle(mux, "GET /api/trucks", trucksHandler, "staff")
 
+	// ---- peak rebalance routes（高峰调拨路线）----
+	handle(mux, "GET /api/peak-routes", routeListHandler, "staff")
+	handle(mux, "POST /api/peak-routes/plan", routePlanHandler, "dispatcher", "operator")
+	handle(mux, "GET /api/peak-routes/deviations", routeDeviationsHandler, "staff")
+	handle(mux, "GET /api/peak-routes/reviews", routeReviewsHandler, "staff")
+	handle(mux, "GET /api/peak-routes/{id}", routeDetailHandler, "staff")
+	handle(mux, "POST /api/peak-routes/{id}/assign", routeAssignHandler, "dispatcher", "operator")
+	handle(mux, "POST /api/peak-routes/{id}/start", routeStartHandler, "dispatcher", "operator")
+	handle(mux, "POST /api/peak-routes/{id}/stops/{seq}/arrive", routeArriveHandler, "dispatcher", "operator")
+	handle(mux, "POST /api/peak-routes/{id}/stops/{seq}/execute", routeExecuteHandler, "dispatcher", "operator")
+	handle(mux, "POST /api/peak-routes/{id}/stops/{seq}/deviation", routeDeviationHandler, "dispatcher", "operator")
+	handle(mux, "POST /api/peak-routes/{id}/review", routeReviewHandler, "dispatcher", "operator")
+	handle(mux, "GET /api/peak-weather", peakWeatherHandler, "staff")
+	handle(mux, "POST /api/peak-weather", peakWeatherSetHandler, "dispatcher", "operator")
+
 	// ---- maintenance ----
 	handle(mux, "GET /api/faults", faultsHandler, "staff")
 	handle(mux, "POST /api/faults/{id}/assign", faultAssignHandler, "repair", "operator")

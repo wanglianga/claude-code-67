@@ -319,4 +319,92 @@ CREATE TABLE IF NOT EXISTS station_adjustments (
   operator_id INT REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ========== 早高峰调拨路线 ==========
+-- 一条路线 = 1 辆调拨车 + 有序多站点（住宅区装车 → 地铁口/缺口站卸车）。
+CREATE TABLE IF NOT EXISTS peak_routes (
+  id SERIAL PRIMARY KEY,
+  code TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  peak_type TEXT NOT NULL DEFAULT 'morning',      -- morning / evening
+  plan_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  scheduled_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status TEXT NOT NULL DEFAULT 'planned',          -- planned/assigned/executing/completed/cancelled
+  truck_id INT REFERENCES trucks(id),
+  driver_id INT REFERENCES users(id),
+  capacity INT NOT NULL DEFAULT 0,                 -- 生成时锁定的调拨车容量
+  total_load INT NOT NULL DEFAULT 0,               -- 计划装车总数（受容量约束）
+  subway_borrow_need INT NOT NULL DEFAULT 0,       -- 生成依据：地铁口取车需求
+  residential_backlog INT NOT NULL DEFAULT 0,      -- 生成依据：住宅区还车积压
+  onboard INT NOT NULL DEFAULT 0,                  -- 执行实时：车上当前车辆数
+  current_seq INT NOT NULL DEFAULT 0,              -- 执行实时：当前应执行站点序号
+  explanation TEXT DEFAULT '',
+  factors TEXT DEFAULT '{}',
+  created_by INT REFERENCES users(id),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 路线站点（有序）：pickup=住宅区装车点，dropoff=地铁口/缺口站卸车点。
+CREATE TABLE IF NOT EXISTS route_stops (
+  id SERIAL PRIMARY KEY,
+  route_id INT NOT NULL REFERENCES peak_routes(id) ON DELETE CASCADE,
+  seq INT NOT NULL,
+  station_id INT NOT NULL REFERENCES stations(id),
+  kind TEXT NOT NULL DEFAULT 'dropoff',            -- pickup / dropoff
+  planned_load INT NOT NULL DEFAULT 0,             -- 计划装(+)卸(-)数量
+  actual_load INT NOT NULL DEFAULT 0,              -- 实际装卸数量
+  eta TIMESTAMPTZ,                                  -- 计划预计到达
+  actual_arrival TIMESTAMPTZ,                       -- 实际到达（实时更新）
+  status TEXT NOT NULL DEFAULT 'pending',          -- pending/arrived/done/skipped
+  -- 偏离：未按计划到达/执行
+  deviated BOOLEAN NOT NULL DEFAULT FALSE,
+  deviation_type TEXT DEFAULT '',                  -- late / early / skipped / short
+  deviation_reason TEXT DEFAULT '',                -- 调度员补充的原因（可免考核）
+  exemption BOOLEAN NOT NULL DEFAULT FALSE,        -- 道路拥堵等客观原因 → 司机免考核
+  impact TEXT DEFAULT '',                           -- 对后续站点补车的影响说明
+  UNIQUE(route_id, seq)
+);
+
+-- 路线上具体车辆：装车时建立、卸车时更新，支撑“车辆状态实时更新”。
+CREATE TABLE IF NOT EXISTS route_bikes (
+  id SERIAL PRIMARY KEY,
+  route_id INT NOT NULL REFERENCES peak_routes(id) ON DELETE CASCADE,
+  bike_id INT NOT NULL REFERENCES bikes(id),
+  loaded_stop_id INT REFERENCES route_stops(id),
+  unloaded_stop_id INT REFERENCES route_stops(id),
+  status TEXT NOT NULL DEFAULT 'onboard'           -- onboard / unloaded
+);
+
+-- 高峰天气：路线复盘关联（按日期 + 早/晚高峰）。
+CREATE TABLE IF NOT EXISTS peak_weather (
+  id SERIAL PRIMARY KEY,
+  peak_date DATE NOT NULL,
+  peak_type TEXT NOT NULL DEFAULT 'morning',
+  condition TEXT NOT NULL DEFAULT '晴',
+  temp_c REAL NOT NULL DEFAULT 20,
+  wind_level TEXT DEFAULT '',
+  alert_level TEXT DEFAULT '',                     -- 无 / 蓝色 / 黄色 / 橙色 / 红色
+  summary TEXT DEFAULT '',
+  UNIQUE(peak_date, peak_type)
+);
+
+-- 调拨复盘：汇总偏离/原因/影响/改进建议，并关联高峰天气。
+CREATE TABLE IF NOT EXISTS route_reviews (
+  id SERIAL PRIMARY KEY,
+  route_id INT NOT NULL REFERENCES peak_routes(id) ON DELETE CASCADE,
+  weather_id INT REFERENCES peak_weather(id),
+  on_time_rate REAL NOT NULL DEFAULT 0,            -- 准点率
+  deviation_count INT NOT NULL DEFAULT 0,
+  exempt_count INT NOT NULL DEFAULT 0,             -- 拥堵豁免次数（不计司机考核）
+  driver_assessment TEXT DEFAULT 'normal',         -- normal / exempt / accountable
+  planned_total INT NOT NULL DEFAULT 0,
+  actual_total INT NOT NULL DEFAULT 0,
+  shortage INT NOT NULL DEFAULT 0,                 -- 少补车辆（影响后续站点）
+  causes TEXT DEFAULT '[]',                        -- 偏离原因归类（进入复盘，优化下次路线）
+  improvement TEXT DEFAULT '',
+  reviewer_id INT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
