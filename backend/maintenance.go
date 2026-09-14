@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -155,7 +156,19 @@ func createRepairHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	if req.Result == "scrapped" {
 		tx.Exec(`UPDATE docks SET status='empty', bike_id=NULL WHERE bike_id=$1`, bikeID)
-		tx.Exec(`UPDATE bikes SET status=$1, station_id=NULL WHERE id=$2`, bikeStatus, bikeID)
+		tx.Exec(`UPDATE bikes SET status=$1, station_id=NULL, deploy_restricted=FALSE WHERE id=$2`, bikeStatus, bikeID)
+		// 报废同步采购计划 + 更新资产台账 + 触发在站资产复核（通知维修仓）
+		var bcode string
+		tx.QueryRow(`SELECT code FROM bikes WHERE id=$1`, bikeID).Scan(&bcode)
+		tx.Exec(`INSERT INTO procurement_plan(bike_code,reason,source_assessment_id,qty,status)
+			VALUES($1,$2,NULL,1,'planned')`, bcode, fmt.Sprintf("维修判定报废（%s故障），资产退役需补充新车", faultTypeNames[faultType]))
+		if assetID, err := ensureAsset(tx, bikeID); err == nil {
+			agg := aggregateBike(bikeID)
+			tx.Exec(`UPDATE vehicle_assets SET status='scrapped', accum_parts_cost=$1,
+				accum_repair_cost=$2, mileage_km=$3, updated_at=now() WHERE id=$4`,
+				agg.PartsCost, agg.Total, agg.Mileage, assetID)
+		}
+		reconcileOnSiteScrap(tx, 0)
 	} else {
 		// 修复后回到维修前所在站（若有）或保持无站点待调拨
 		tx.Exec(`UPDATE bikes SET status=$1 WHERE id=$2`, bikeStatus, bikeID)
@@ -218,15 +231,19 @@ func bikeArchiveHandler(w http.ResponseWriter, r *http.Request, _ *User) {
 	var (
 		code, status            string
 		totalRides              int
+		mileage                 float64
+		restricted              bool
 		lastCleaned             sql.NullTime
 	)
 	var err error
 	if _, serr := strconv.ParseInt(id, 10, 64); serr == nil {
-		err = db.QueryRow(`SELECT code, status, total_rides, last_cleaned_at FROM bikes WHERE id=$1`, id).
-			Scan(&code, &status, &totalRides, &lastCleaned)
+		err = db.QueryRow(`SELECT code, status, total_rides, last_cleaned_at, COALESCE(mileage_km,0), deploy_restricted
+			FROM bikes WHERE id=$1`, id).
+			Scan(&code, &status, &totalRides, &lastCleaned, &mileage, &restricted)
 	} else {
-		err = db.QueryRow(`SELECT code, status, total_rides, last_cleaned_at FROM bikes WHERE code=$1`, id).
-			Scan(&code, &status, &totalRides, &lastCleaned)
+		err = db.QueryRow(`SELECT code, status, total_rides, last_cleaned_at, COALESCE(mileage_km,0), deploy_restricted
+			FROM bikes WHERE code=$1`, id).
+			Scan(&code, &status, &totalRides, &lastCleaned, &mileage, &restricted)
 	}
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "车辆不存在")
@@ -273,8 +290,14 @@ func bikeArchiveHandler(w http.ResponseWriter, r *http.Request, _ *User) {
 			"is_repeat": repeat.Bool, "repairer": repairer.String, "parts": parts,
 		})
 	}
+	var totalPartsCost float64
+	db.QueryRow(`SELECT COALESCE(sum(rp.qty*p.unit_price),0)
+		FROM repair_parts rp JOIN parts p ON p.id=rp.part_id
+		JOIN repairs r ON r.id=rp.repair_id WHERE r.bike_id=(SELECT id FROM bikes WHERE code=$1)`, code).Scan(&totalPartsCost)
 	writeJSON(w, 200, map[string]any{
 		"code": code, "status": status, "total_rides": totalRides,
+		"mileage_km": mileage, "deploy_restricted": restricted,
+		"total_parts_cost": totalPartsCost,
 		"last_cleaned_at": timePtr(lastCleaned), "history": history,
 	})
 }

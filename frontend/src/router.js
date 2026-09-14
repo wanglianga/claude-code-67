@@ -12,13 +12,14 @@ const routes = [
   { path: '/peak-routes', component: () => import('./views/PeakRoutes.vue'), meta: { staff: true } },
   { path: '/peak-routes/:id', component: () => import('./views/PeakRouteDetail.vue'), meta: { staff: true } },
   { path: '/maintenance', component: () => import('./views/Maintenance.vue'), meta: { staff: true } },
+  { path: '/assets', component: () => import('./views/AssetLedger.vue'), meta: { staff: true } },
   { path: '/appeals', component: () => import('./views/Appeals.vue') },
   { path: '/appeals/:id', component: () => import('./views/AppealDetail.vue') },
   { path: '/stations', component: () => import('./views/Stations.vue'), meta: { staff: true } },
   { path: '/ops', component: () => import('./views/Ops.vue'), meta: { staff: true } },
 ]
 
-const STAFF = ['cs', 'dispatcher', 'repair', 'station_admin', 'operator', 'city', 'driver']
+const STAFF = ['cs', 'dispatcher', 'repair', 'repair_lead', 'station_admin', 'operator', 'city', 'driver']
 
 const router = createRouter({ history: createWebHistory(), routes })
 

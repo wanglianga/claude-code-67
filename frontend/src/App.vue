@@ -44,12 +44,13 @@ const MENUS = [
   { path: '/events', title: '协同事件', icon: '🚨', roles: 'all' },
   { path: '/rebalance', title: '调拨中心', icon: '🚚', roles: ['dispatcher', 'operator', 'city', 'cs'] },
   { path: '/peak-routes', title: '高峰调拨路线', icon: '🗺️', roles: ['dispatcher', 'operator', 'city', 'cs'] },
-  { path: '/maintenance', title: '维修与车辆档案', icon: '🔧', roles: ['repair', 'operator', 'dispatcher'] },
+  { path: '/maintenance', title: '维修与车辆档案', icon: '🔧', roles: ['repair', 'operator', 'dispatcher', 'repair_lead'] },
+  { path: '/assets', title: '报废评估与资产台账', icon: '🏷️', roles: ['repair_lead', 'repair', 'operator', 'dispatcher'] },
   { path: '/appeals', title: '申诉处理', icon: '📝', roles: 'all' },
   { path: '/stations', title: '站点与调整分析', icon: '📍', roles: ['operator', 'station_admin', 'city', 'dispatcher'] },
   { path: '/ops', title: '运营判断', icon: '🧭', roles: ['operator', 'dispatcher', 'station_admin', 'repair'] },
 ]
-const STAFF = ['cs', 'dispatcher', 'repair', 'station_admin', 'operator', 'city', 'driver']
+const STAFF = ['cs', 'dispatcher', 'repair', 'repair_lead', 'station_admin', 'operator', 'city', 'driver']
 
 const menu = computed(() => {
   const u = user.value

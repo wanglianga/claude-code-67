@@ -33,6 +33,7 @@ var roleNames = map[string]string{
 	"operator":      "运营",
 	"city":          "城市管理方",
 	"driver":        "调拨车司机",
+	"repair_lead":   "维修主管",
 }
 
 // locCN 统一按 Asia/Shanghai 计算运营时段（早高峰/放学/商圈/预测），
@@ -53,6 +54,7 @@ func hourCN() int {
 var staffRoles = map[string]bool{
 	"cs": true, "dispatcher": true, "repair": true,
 	"station_admin": true, "operator": true, "city": true, "driver": true,
+	"repair_lead": true,
 }
 
 type ctxKey string

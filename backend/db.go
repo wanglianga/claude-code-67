@@ -407,4 +407,81 @@ CREATE TABLE IF NOT EXISTS route_reviews (
   reviewer_id INT REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ========== 重复故障报废评估 / 车辆资产台账 ==========
+-- 既有表补充字段（幂等）：车辆里程与限制投放、行程里程、配件单价
+ALTER TABLE bikes  ADD COLUMN IF NOT EXISTS mileage_km NUMERIC(10,1) NOT NULL DEFAULT 0;
+ALTER TABLE bikes  ADD COLUMN IF NOT EXISTS deploy_restricted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE rides  ADD COLUMN IF NOT EXISTS distance_km NUMERIC(6,2);
+ALTER TABLE parts  ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+-- 重复故障报废评估单：汇总维修记录、骑行里程、配件成本，由维修主管裁决。
+CREATE TABLE IF NOT EXISTS scrap_assessments (
+  id SERIAL PRIMARY KEY,
+  bike_id INT NOT NULL REFERENCES bikes(id),
+  trigger_fault_id INT REFERENCES faults(id),
+  -- 评估快照
+  brake_count INT NOT NULL DEFAULT 0,              -- 刹车问题次数
+  lock_count INT NOT NULL DEFAULT 0,               -- 车锁问题次数
+  tire_count INT NOT NULL DEFAULT 0,               -- 轮胎问题次数
+  repeat_count INT NOT NULL DEFAULT 0,             -- 30 天内同车同类型重复次数
+  repair_count INT NOT NULL DEFAULT 0,             -- 历史维修次数
+  mileage_km NUMERIC(10,1) NOT NULL DEFAULT 0,     -- 累计骑行里程
+  parts_cost NUMERIC(10,2) NOT NULL DEFAULT 0,     -- 累计配件成本
+  labor_cost NUMERIC(10,2) NOT NULL DEFAULT 0,     -- 累计维修工时成本
+  total_cost NUMERIC(10,2) NOT NULL DEFAULT 0,
+  recommendation TEXT NOT NULL DEFAULT 'continue', -- continue / restrict / scrap（系统建议）
+  decision TEXT NOT NULL DEFAULT 'pending',        -- pending / continue / restrict / scrap
+  decision_reason TEXT DEFAULT '',
+  decided_by INT REFERENCES users(id),
+  decided_at TIMESTAMPTZ,
+  procurement_id INT,                              -- 报废后生成的采购计划行
+  status TEXT NOT NULL DEFAULT 'open',             -- open / decided
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 车辆资产台账：记录每辆车的资产状态变更（在役/限制投放/报废/残值）。
+CREATE TABLE IF NOT EXISTS vehicle_assets (
+  id SERIAL PRIMARY KEY,
+  bike_id INT NOT NULL REFERENCES bikes(id),
+  asset_code TEXT NOT NULL DEFAULT '',             -- 资产编号
+  status TEXT NOT NULL DEFAULT 'active',           -- active / restricted / scrapped
+  purchase_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  purchase_price NUMERIC(10,2) NOT NULL DEFAULT 380,
+  salvage_value NUMERIC(10,2) NOT NULL DEFAULT 0,
+  accum_parts_cost NUMERIC(10,2) NOT NULL DEFAULT 0,
+  accum_repair_cost NUMERIC(10,2) NOT NULL DEFAULT 0,
+  mileage_km NUMERIC(10,1) NOT NULL DEFAULT 0,
+  last_assessment_id INT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 采购计划：报废决定同步生成补货需求。
+CREATE TABLE IF NOT EXISTS procurement_plan (
+  id SERIAL PRIMARY KEY,
+  bike_code TEXT DEFAULT '',
+  reason TEXT DEFAULT '',
+  source_assessment_id INT,
+  qty INT NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'planned',          -- planned / ordered / received
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 资产状态复核：报废车辆若仍在站点（账面报废、现场有车）触发，通知维修仓。
+CREATE TABLE IF NOT EXISTS asset_reviews (
+  id SERIAL PRIMARY KEY,
+  bike_id INT NOT NULL REFERENCES bikes(id),
+  bike_code TEXT NOT NULL DEFAULT '',
+  station_id INT REFERENCES stations(id),
+  dock_id INT,
+  type TEXT NOT NULL DEFAULT 'scrapped_on_site',   -- scrapped_on_site / ledger_mismatch
+  detail TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',             -- open / acknowledged / resolved
+  notified_warehouse BOOLEAN NOT NULL DEFAULT FALSE,
+  warehouse_note TEXT DEFAULT '',
+  handler_id INT REFERENCES users(id),
+  source_assessment_id INT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  handled_at TIMESTAMPTZ
+);
 `

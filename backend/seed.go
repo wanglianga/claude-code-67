@@ -60,6 +60,7 @@ func seed() (err error) {
 	addUser("cs1", "王芳", "cs", 0, 0, "active", false)
 	addUser("disp1", "李强", "dispatcher", 0, 0, "active", false)
 	addUser("repair1", "赵建国", "repair", 0, 0, "active", false)
+	addUser("lead1", "陈工", "repair_lead", 0, 0, "active", false)
 	addUser("admin1", "孙丽", "station_admin", 0, 0, "active", false)
 	addUser("ops1", "周明", "operator", 0, 0, "active", false)
 	addUser("city1", "城管委观察员", "city", 0, 0, "active", false)
@@ -102,7 +103,7 @@ func seed() (err error) {
 	// ---------- bikes & docks ----------
 	// 每站健康在桩车辆数（ST04 接近满桩，ST01/ST06 接近空桩）
 	// 健康在桩 3+5+4+27+8+2+2+2 = 53；故障在桩 2（ST04、ST02 各1）；
-	// 另：租用3、维修中2、普通调拨在途2、早高峰路线已从 ST05 装车在途10、清洗1、报废1 → 共 74 辆
+	// 另：租用3、维修中2、普通调拨在途2、早高峰路线已从 ST05 装车在途10、清洗1、报废2（含1辆仍在站待复核）→ 共 75 辆
 	// ST05 滨江社区 8/18：早高峰前原 18 桩全满（住宅区还车积压），高峰路线已装车 10 辆运出
 	dockedCounts := []int{3, 5, 4, 27, 8, 2, 2, 2}
 	bikeNo := 0
@@ -205,10 +206,11 @@ func seed() (err error) {
 	for _, p := range []struct {
 		name  string
 		stock int
+		price float64
 	}{
-		{"刹车线", 25}, {"智能锁芯", 12}, {"链条", 18}, {"轮胎", 20}, {"坐垫", 15}, {"脚踏", 30},
+		{"刹车线", 25, 18}, {"智能锁芯", 12, 96}, {"链条", 18, 42}, {"轮胎", 20, 65}, {"坐垫", 15, 35}, {"脚踏", 30, 22},
 	} {
-		partIDs[p.name] = one(`INSERT INTO parts(name,stock) VALUES($1,$2) RETURNING id`, p.name, p.stock)
+		partIDs[p.name] = one(`INSERT INTO parts(name,stock,unit_price) VALUES($1,$2,$3) RETURNING id`, p.name, p.stock, p.price)
 	}
 
 	// ---------- faults & repairs ----------
@@ -246,6 +248,75 @@ func seed() (err error) {
 		f5, bkScrapped, uid["repair1"])
 	ex(`INSERT INTO repair_parts(repair_id,part_id,qty) VALUES($1,$2,1)`, r3, partIDs["刹车线"])
 	ex(`UPDATE parts SET stock=stock-3 WHERE name='刹车线'`)
+
+	// ---- 重复故障报废评估演示 ----
+	// bkRepeat（滨江社区在桩车）：20 天 / 5 天内两次刹车维修（均重复），再补一条今日待处理刹车故障，
+	// 里程已超 1.2 万 km → 报废评估系统建议“报废”，等待维修主管裁决。
+	ex(`UPDATE bikes SET mileage_km=13240.5 WHERE id=$1`, bkRepeat)
+	one(`INSERT INTO faults(bike_id,station_id,type,description,status,reporter_id,created_at)
+		VALUES($1,$2,'brake','刹车再次偏软，捏到底制动距离明显变长，车主不敢再骑','pending',$3,now()-interval '2 hours') RETURNING id`,
+		bkRepeat, stID[4], uid["rider4"])
+
+	// 账面报废但仍在站点：BK 报废车仍占用中心医院站桩位（账面有车现场也有，但资产状态不一致），
+	// 已生成资产状态复核并通知维修仓，等待现场回收销账。
+	bkGhost := newBike("scrapped", stID[6])
+	ex(`UPDATE bikes SET station_id=$1, mileage_km=9870 WHERE id=$2`, stID[6], bkGhost)
+	ex(`UPDATE docks SET status='occupied', bike_id=$1 WHERE station_id=$2 AND dock_no=14`, bkGhost, stID[6])
+	ex(`INSERT INTO vehicle_assets(bike_id,asset_code,status,purchase_price,salvage_value,accum_parts_cost,accum_repair_cost,mileage_km)
+		VALUES($1,$2,'scrapped',380,30,186,420,9870)`,
+		bkGhost, "ZC-BK-GHOST")
+	ex(`INSERT INTO procurement_plan(bike_code,reason,qty,status,created_at)
+		VALUES((SELECT code FROM bikes WHERE id=$1),'车架锈蚀、刹车报废，资产退役补新车',1,'planned',now()-interval '1 day')`,
+		bkGhost)
+	ex(`INSERT INTO asset_reviews(bike_id,bike_code,station_id,dock_id,type,detail,status,notified_warehouse,created_at)
+		VALUES($1,(SELECT code FROM bikes WHERE id=$1),$2,
+		  (SELECT id FROM docks WHERE station_id=$2 AND bike_id=$1),
+		  'scrapped_on_site','该报废车辆仍停放在中心医院站 14 号桩，账面已报废但现场未回收，请维修仓现场清运并释放桩位。',
+		  'open',TRUE,now()-interval '20 hours')`,
+		bkGhost, stID[6])
+
+	// 限投候选：ST02 一辆在桩车两次车锁故障（含 1 次重复维修、换过锁芯）→ 系统建议限制投放
+	var bkLock int64
+	err = tx.QueryRow(`SELECT id FROM bikes WHERE station_id=$1 AND status='docked' ORDER BY id LIMIT 1`, stID[1]).Scan(&bkLock)
+	if err != nil {
+		return err
+	}
+	lf1 := one(`INSERT INTO faults(bike_id,station_id,type,description,status,reporter_id,created_at)
+		VALUES($1,$2,'lock','智能锁反应迟钝，偶尔扫码不开（限投演练1）','fixed',$3,now()-interval '6 days') RETURNING id`,
+		bkLock, stID[1], uid["rider6"])
+	one(`INSERT INTO repairs(fault_id,bike_id,repairer_id,started_at,finished_at,duration_min,result,is_repeat)
+		VALUES($1,$2,$3,now()-interval '6 days',now()-interval '6 days'+interval '20 minutes',20,'fixed',FALSE) RETURNING id`,
+		lf1, bkLock, uid["repair1"])
+	ex(`INSERT INTO repair_parts(repair_id,part_id,qty)
+		VALUES((SELECT id FROM repairs WHERE fault_id=$1),$2,1)`, lf1, partIDs["智能锁芯"])
+	lf2 := one(`INSERT INTO faults(bike_id,station_id,type,description,status,reporter_id,created_at)
+		VALUES($1,$2,'lock','换锁后仍偶发卡滞（限投演练2）','fixed',$3,now()-interval '2 days') RETURNING id`,
+		bkLock, stID[1], uid["rider5"])
+	lr2 := one(`INSERT INTO repairs(fault_id,bike_id,repairer_id,started_at,finished_at,duration_min,result,is_repeat)
+		VALUES($1,$2,$3,now()-interval '2 days',now()-interval '2 days'+interval '25 minutes',25,'fixed',TRUE) RETURNING id`,
+		lf2, bkLock, uid["repair1"])
+	ex(`INSERT INTO repair_parts(repair_id,part_id,qty) VALUES($1,$2,1)`, lr2, partIDs["智能锁芯"])
+	ex(`UPDATE parts SET stock=stock-2 WHERE name='智能锁芯'`)
+	ex(`UPDATE bikes SET mileage_km=8650 WHERE id=$1`, bkLock)
+
+	// 继续维修候选：ST03 一辆在桩车两次轮胎慢撒气（1 次已修、1 次待处理）→ 系统建议继续维修
+	var bkTire int64
+	err = tx.QueryRow(`SELECT id FROM bikes WHERE station_id=$1 AND status='docked' ORDER BY id LIMIT 1`, stID[2]).Scan(&bkTire)
+	if err != nil {
+		return err
+	}
+	tf1 := one(`INSERT INTO faults(bike_id,station_id,type,description,status,reporter_id,created_at)
+		VALUES($1,$2,'tire','前轮慢撒气（续修演练1）','fixed',$3,now()-interval '8 days') RETURNING id`,
+		bkTire, stID[2], uid["rider6"])
+	trep1 := one(`INSERT INTO repairs(fault_id,bike_id,repairer_id,started_at,finished_at,duration_min,result,is_repeat)
+		VALUES($1,$2,$3,now()-interval '8 days',now()-interval '8 days'+interval '30 minutes',30,'fixed',FALSE) RETURNING id`,
+		tf1, bkTire, uid["repair1"])
+	ex(`INSERT INTO repair_parts(repair_id,part_id,qty) VALUES($1,$2,1)`, trep1, partIDs["轮胎"])
+	ex(`UPDATE parts SET stock=stock-1 WHERE name='轮胎'`)
+	one(`INSERT INTO faults(bike_id,station_id,type,description,status,reporter_id,created_at)
+		VALUES($1,$2,'tire','补气后再次提示胎压不足（续修演练2·待处理）','pending',$3,now()-interval '1 hour') RETURNING id`,
+		bkTire, stID[2], uid["rider5"])
+	ex(`UPDATE bikes SET mileage_km=6200 WHERE id=$1`, bkTire)
 
 	// ---------- trucks & shifts ----------
 	tr1 := one(`INSERT INTO trucks(plate,capacity,status,driver_id,location_x,location_y)

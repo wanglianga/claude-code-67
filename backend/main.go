@@ -72,6 +72,18 @@ func main() {
 	handle(mux, "GET /api/peak-weather", peakWeatherHandler, "staff")
 	handle(mux, "POST /api/peak-weather", peakWeatherSetHandler, "dispatcher", "operator")
 
+	// ---- 重复故障报废评估 / 车辆资产台账 ----
+	handle(mux, "GET /api/assets/candidates", assetCandidatesHandler, "staff")
+	handle(mux, "GET /api/assets/assessments", assessmentsHandler, "staff")
+	handle(mux, "POST /api/assets/assessments", createAssessmentHandler, "repair_lead")
+	handle(mux, "GET /api/assets/assessments/{id}", assessmentDetailHandler, "staff")
+	handle(mux, "POST /api/assets/assessments/{id}/decide", decideAssessmentHandler, "repair_lead")
+	handle(mux, "GET /api/assets/ledger", vehicleAssetsHandler, "staff")
+	handle(mux, "GET /api/assets/procurement", procurementHandler, "staff")
+	handle(mux, "GET /api/assets/forecast", stationForecastHandler, "staff")
+	handle(mux, "GET /api/assets/reviews", assetReviewsHandler, "staff")
+	handle(mux, "POST /api/assets/reviews/{id}/handle", assetReviewHandleHandler, "repair", "repair_lead")
+
 	// ---- maintenance ----
 	handle(mux, "GET /api/faults", faultsHandler, "staff")
 	handle(mux, "POST /api/faults/{id}/assign", faultAssignHandler, "repair", "operator")

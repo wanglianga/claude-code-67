@@ -152,6 +152,7 @@ func returnHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		borrowTime  time.Time
 		rideStatus  string
 		rideUser    int64
+		distanceKm  float64
 	)
 	err := db.QueryRow(`SELECT user_id, bike_id, borrow_time, status FROM rides WHERE id=$1`, rideID).
 		Scan(&rideUser, &bikeID, &borrowTime, &rideStatus)
@@ -208,17 +209,23 @@ func returnHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	if req.FaultType != "" {
 		bikeNewStatus = "fault"
 	}
-	if _, err := tx.Exec(`UPDATE bikes SET status=$1, station_id=$2, lock_status='locked', total_rides=total_rides+1 WHERE id=$3`,
-		bikeNewStatus, req.StationID, bikeID); err != nil {
+	// 骑行里程：按城市公共自行车平均 12 km/h 估算，累计进车辆里程（供报废评估）
+	now := time.Now()
+	distanceKm = 0.0
+	if mins := now.Sub(borrowTime).Minutes(); mins > 0 {
+		distanceKm = math.Round(mins/60.0*12.0*100) / 100
+	}
+	if _, err := tx.Exec(`UPDATE bikes SET status=$1, station_id=$2, lock_status='locked',
+		total_rides=total_rides+1, mileage_km=mileage_km+$4 WHERE id=$3`,
+		bikeNewStatus, req.StationID, bikeID, distanceKm); err != nil {
 		writeErr(w, 500, "车辆锁止失败")
 		return
 	}
 	// 费用
-	now := time.Now()
 	fee := calcFee(borrowTime, now)
 	if _, err := tx.Exec(`UPDATE rides SET return_station_id=$1, return_dock_id=$2, return_time=$3,
-		fee=$4, status='completed', user_location=$5, fault_type=$6, fault_feedback=$7 WHERE id=$8`,
-		req.StationID, dockID, now, fee, req.Location, req.FaultType, req.FaultFeedback, rideID); err != nil {
+		fee=$4, status='completed', user_location=$5, fault_type=$6, fault_feedback=$7, distance_km=$8 WHERE id=$9`,
+		req.StationID, dockID, now, fee, req.Location, req.FaultType, req.FaultFeedback, distanceKm, rideID); err != nil {
 		writeErr(w, 500, "结束行程失败")
 		return
 	}

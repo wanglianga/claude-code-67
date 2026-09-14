@@ -1,6 +1,9 @@
 <template>
   <div>
-    <div class="page-title">维修与车辆档案</div>
+    <div class="between mb">
+      <div class="page-title">维修与车辆档案</div>
+      <button v-if="isLead" class="btn ghost" @click="$router.push('/assets')">🏷️ 重复故障报废评估 / 资产台账</button>
+    </div>
     <div class="page-sub">故障类型 · 维修用时 · 配件消耗 · 重复故障 · 报废 —— 全部进入车辆档案</div>
 
     <div class="grid grid-4 mb" v-if="stats">
@@ -43,7 +46,10 @@
         <div v-if="archive">
           <dl class="kv mb">
             <dt>车辆</dt><dd class="mono">{{ archive.code }} <span class="badge" :class="archive.status === 'scrapped' ? 'danger' : 'ok'">{{ bikeStatusName(archive.status) }}</span></dd>
-            <dt>累计骑行</dt><dd>{{ archive.total_rides }} 次</dd>
+            <dt>累计骑行</dt><dd>{{ archive.total_rides }} 次 · {{ Math.round(archive.mileage_km || 0) }} km
+              <span v-if="archive.deploy_restricted" class="badge warn">限制投放</span>
+            </dd>
+            <dt>累计配件</dt><dd>¥{{ (archive.total_parts_cost || 0).toFixed(0) }}</dd>
             <dt>最近清洗</dt><dd>{{ archive.last_cleaned_at ? fmt(archive.last_cleaned_at) : '未记录' }}</dd>
           </dl>
           <div class="timeline">
@@ -147,6 +153,7 @@ const repairFault = ref(null)
 const repairForm = ref({ duration_min: 30, result: 'fixed', notes: '', parts: [] })
 
 const isRepair = computed(() => ['repair', 'operator'].includes(getUser()?.role))
+const isLead = computed(() => ['repair_lead', 'operator'].includes(getUser()?.role))
 
 function faultBadge(s) { return { pending: 'danger', assigned: 'warn', repairing: 'purple', fixed: 'ok', scrapped: 'gray' }[s] || 'gray' }
 function faultName(s) { return { pending: '待接单', assigned: '已派单', repairing: '维修中', fixed: '已修复', scrapped: '已报废' }[s] || s }
