@@ -47,6 +47,7 @@ const MENUS = [
   { path: '/maintenance', title: '维修与车辆档案', icon: '🔧', roles: ['repair', 'operator', 'dispatcher', 'repair_lead'] },
   { path: '/assets', title: '报废评估与资产台账', icon: '🏷️', roles: ['repair_lead', 'repair', 'operator', 'dispatcher'] },
   { path: '/appeals', title: '申诉处理', icon: '📝', roles: 'all' },
+  { path: '/temp-returns', title: '临时还车审核', icon: '📷', roles: ['cs', 'operator'] },
   { path: '/stations', title: '站点与调整分析', icon: '📍', roles: ['operator', 'station_admin', 'city', 'dispatcher'] },
   { path: '/ops', title: '运营判断', icon: '🧭', roles: ['operator', 'dispatcher', 'station_admin', 'repair'] },
 ]

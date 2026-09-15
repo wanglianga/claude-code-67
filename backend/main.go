@@ -34,6 +34,12 @@ func main() {
 	handle(mux, "POST /api/rides/borrow", borrowHandler, "user")
 	handle(mux, "POST /api/rides/{id}/return", returnHandler, "user")
 	handle(mux, "GET /api/rides/my", myRidesHandler, "user")
+	handle(mux, "POST /api/rides/return-guidance", returnGuidanceHandler, "user")
+	handle(mux, "POST /api/rides/guidance/accept", acceptGuidanceHandler, "user")
+	handle(mux, "POST /api/temp-returns", tempReturnCreateHandler, "user")
+	handle(mux, "GET /api/temp-returns/my", tempReturnMyHandler, "user")
+	handle(mux, "GET /api/temp-returns", tempReturnListHandler, "staff")
+	handle(mux, "POST /api/temp-returns/{id}/review", tempReturnReviewHandler, "cs", "operator")
 	handle(mux, "GET /api/rides/{id}", rideDetailHandler, "any")
 	handle(mux, "POST /api/rides/{id}/lock-stuck", lockStuckHandler, "user")
 

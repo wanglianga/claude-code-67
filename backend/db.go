@@ -484,4 +484,35 @@ CREATE TABLE IF NOT EXISTS asset_reviews (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   handled_at TIMESTAMPTZ
 );
+
+-- ========== 满桩还车引导 / 临时还车处理单 ==========
+ALTER TABLE users ADD COLUMN IF NOT EXISTS credit_score INT NOT NULL DEFAULT 100; -- 用户信用分
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS fee_paused BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS fee_pause_time TIMESTAMPTZ;             -- 接受引导、费用暂停时刻
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS guidance_station_id INT REFERENCES stations(id);
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS fee_adjust_reason TEXT DEFAULT '';      -- 临时单关闭后的费用调整理由（用户可见）
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS fee_adjust_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+-- 附近无空桩时由用户发起、客服审核的临时还车处理单（必须绑定含站点编号的车辆照片与用户位置）。
+CREATE TABLE IF NOT EXISTS temp_return_orders (
+  id SERIAL PRIMARY KEY,
+  ride_id INT NOT NULL REFERENCES rides(id),
+  bike_id INT NOT NULL REFERENCES bikes(id),
+  user_id INT NOT NULL REFERENCES users(id),
+  full_station_id INT REFERENCES stations(id),   -- 满桩、无法还车的站点
+  station_code TEXT NOT NULL DEFAULT '',         -- 照片中识别/用户确认的站点编号
+  photo_data TEXT NOT NULL DEFAULT '',           -- 车辆+站点编号照片（data URL 演示）
+  user_location TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',        -- pending / approved / rejected
+  overtime BOOLEAN NOT NULL DEFAULT FALSE,       -- 提交时是否已超时
+  fee_paused BOOLEAN NOT NULL DEFAULT FALSE,     -- 该单是否已暂停计费
+  pause_time TIMESTAMPTZ,
+  fee_before_pause NUMERIC(10,2) NOT NULL DEFAULT 0, -- 暂停时刻已产生费用
+  handler_id INT REFERENCES users(id),
+  adjust_reason TEXT DEFAULT '',                 -- 客服审核填写的费用调整理由
+  waiver_amount NUMERIC(10,2) NOT NULL DEFAULT 0,-- 免除/调整金额
+  final_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
+  handled_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `

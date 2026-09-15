@@ -608,5 +608,55 @@ func seed() (err error) {
 		'下一次高峰路线提前 10 分钟发车、预留拥堵缓冲，并优先选择非主干道的社区—地铁接驳通道；结合黄色降雨预警同步提前。',$3)`,
 		pr0, w0, uid["disp1"])
 
+	// ---------- 满桩还车引导 / 临时还车 ----------
+	// 用户信用分
+	for _, c := range []struct {
+		u string
+		v int
+	}{{"rider1", 95}, {"rider2", 80}, {"rider3", 60}, {"rider4", 98}, {"rider5", 90}, {"rider6", 85}} {
+		ex(`UPDATE users SET credit_score=$2, phone=$3 WHERE username=$1`, c.u, c.v, "138****000"+fmt.Sprint(c.v%10))
+	}
+	photoSVG := func(code string) string {
+		svg := "<svg xmlns='http://www.w3.org/2000/svg' width='480' height='300'>" +
+			"<rect width='480' height='300' fill='dimgrey'/>" +
+			"<circle cx='150' cy='210' r='46' fill='none' stroke='white' stroke-width='6'/>" +
+			"<circle cx='330' cy='210' r='46' fill='none' stroke='white' stroke-width='6'/>" +
+			"<path d='M150 210 L220 130 L300 130 L330 210' fill='none' stroke='white' stroke-width='6'/>" +
+			"<rect x='0' y='0' width='480' height='56' fill='black' opacity='0.55'/>" +
+			"<text x='16' y='38' font-family='sans-serif' font-size='30' font-weight='bold' fill='yellow'>STATION " + code + "</text>" +
+			"<text x='16' y='288' font-family='sans-serif' font-size='16' fill='white'>bike + station code evidence</text></svg>"
+		return "data:image/svg+xml;utf8," + svg
+	}
+
+	// 待审核临时还车单：rider4 进行中行程在万象城站（ST04，满桩）无法还车，已临时锁车、计费暂停，等待客服审核。
+	tmpRide1 := one(`SELECT id FROM rides WHERE user_id=$1 AND status='ongoing' ORDER BY id LIMIT 1`, uid["rider4"])
+	ex(`UPDATE bikes SET status='temp_locked', station_id=NULL WHERE id=$1`, bkRent1)
+	ex(`UPDATE rides SET status='temp_pending', return_station_id=$1, fee=6.00,
+		fee_paused=TRUE, fee_pause_time=now()-interval '15 minutes',
+		fee_adjust_reason='临时还车待客服审核，审核期间暂停计费', user_location='万象城西门围栏停放区'
+		WHERE id=$2`, stID[3], tmpRide1)
+	ex(`INSERT INTO temp_return_orders(ride_id,bike_id,user_id,full_station_id,station_code,photo_data,
+		user_location,status,overtime,fee_paused,pause_time,fee_before_pause,created_at)
+		VALUES($1,$2,$3,$4,'ST04',$5,'万象城西门围栏停放区','pending',TRUE,TRUE,now()-interval '15 minutes',6.00,now()-interval '15 minutes')`,
+		tmpRide1, bkRent1, uid["rider4"], stID[3], photoSVG("ST04"))
+
+	// 已通过的历史临时还车单（rider5，免除找桩等待费用 4.5 元，最终 1.5 元；用户端可见调整理由）
+	bkTemp2 := newBike("docked", stID[0])
+	ex(`UPDATE docks SET status='occupied',bike_id=$1 WHERE station_id=$2 AND dock_no=(
+		SELECT min(dock_no) FROM docks WHERE station_id=$2 AND status='empty')`, bkTemp2, stID[0])
+	tmpRide2 := one(`INSERT INTO rides(user_id,bike_id,borrow_station_id,borrow_dock_id,borrow_time,
+		return_station_id,return_time,fee,status,fee_paused,fee_pause_time,fee_adjust_reason,fee_adjust_amount,user_location)
+		VALUES($1,$2,$3,(SELECT id FROM docks WHERE station_id=$3 AND dock_no=1),now()-interval '26 hours',
+		$4,now()-interval '25 hours 50 minutes',1.50,'completed',TRUE,now()-interval '25 hours 50 minutes',
+		'您在万象城站满桩时按引导临时还车，照片含站点编号、位置属实，免除找桩等待期间费用 4.5 元，最终收取 1.5 元',4.50,'万象城西门') RETURNING id`,
+		uid["rider5"], bkTemp2, stID[3], stID[0])
+	ex(`INSERT INTO temp_return_orders(ride_id,bike_id,user_id,full_station_id,station_code,photo_data,
+		user_location,status,overtime,fee_paused,pause_time,fee_before_pause,handler_id,adjust_reason,waiver_amount,final_fee,created_at,handled_at)
+		VALUES($1,$2,$3,$4,'ST04',$5,'万象城西门','approved',FALSE,TRUE,
+		now()-interval '25 hours 50 minutes',6.00,$6,
+		'满桩引导临时还车，照片含站点编号、位置属实，免除找桩等待费用',4.50,1.50,
+		now()-interval '26 hours',now()-interval '25 hours 40 minutes')`,
+		tmpRide2, bkTemp2, uid["rider5"], stID[3], photoSVG("ST04"), uid["cs1"])
+
 	return tx.Commit()
 }

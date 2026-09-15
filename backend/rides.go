@@ -40,8 +40,14 @@ func borrowHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		return
 	}
 	var ongoing int
-	db.QueryRow(`SELECT count(*) FROM rides WHERE user_id=$1 AND status='ongoing'`, u.ID).Scan(&ongoing)
+	db.QueryRow(`SELECT count(*) FROM rides WHERE user_id=$1 AND status IN ('ongoing','temp_pending')`, u.ID).Scan(&ongoing)
 	if ongoing > 0 {
+		var st string
+		db.QueryRow(`SELECT status FROM rides WHERE user_id=$1 AND status IN ('ongoing','temp_pending') LIMIT 1`, u.ID).Scan(&st)
+		if st == "temp_pending" {
+			writeErr(w, 409, "您有一笔临时还车申请正在客服审核中，请等待审核结果后再借车")
+			return
+		}
 		writeErr(w, 409, "您有进行中的行程，请先还车")
 		return
 	}
@@ -153,9 +159,12 @@ func returnHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		rideStatus  string
 		rideUser    int64
 		distanceKm  float64
+		feePaused   bool
+		pauseTime   sql.NullTime
 	)
-	err := db.QueryRow(`SELECT user_id, bike_id, borrow_time, status FROM rides WHERE id=$1`, rideID).
-		Scan(&rideUser, &bikeID, &borrowTime, &rideStatus)
+	err := db.QueryRow(`SELECT user_id, bike_id, borrow_time, status, fee_paused, fee_pause_time
+		FROM rides WHERE id=$1`, rideID).
+		Scan(&rideUser, &bikeID, &borrowTime, &rideStatus, &feePaused, &pauseTime)
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "行程不存在")
 		return
@@ -165,6 +174,10 @@ func returnHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	if rideUser != u.ID {
 		writeErr(w, 403, "只能结束自己的行程")
+		return
+	}
+	if rideStatus == "temp_pending" {
+		writeErr(w, 409, "该行程的临时还车申请正在客服审核中，审核期间无需重复还车")
 		return
 	}
 	if rideStatus != "ongoing" {
@@ -209,8 +222,14 @@ func returnHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	if req.FaultType != "" {
 		bikeNewStatus = "fault"
 	}
-	// 骑行里程：按城市公共自行车平均 12 km/h 估算，累计进车辆里程（供报废评估）
+	// 费用：接受过满桩还车引导/临时还车暂停计费的，按暂停时刻封顶（路上与找桩时间不计费）
 	now := time.Now()
+	var fee float64
+	if feePaused && pauseTime.Valid {
+		fee = calcFee(borrowTime, pauseTime.Time)
+	} else {
+		fee = calcFee(borrowTime, now)
+	}
 	distanceKm = 0.0
 	if mins := now.Sub(borrowTime).Minutes(); mins > 0 {
 		distanceKm = math.Round(mins/60.0*12.0*100) / 100
@@ -221,13 +240,17 @@ func returnHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		writeErr(w, 500, "车辆锁止失败")
 		return
 	}
-	// 费用
-	fee := calcFee(borrowTime, now)
+	// 还车落账（接受过引导时 fee 已按暂停时刻封顶）
 	if _, err := tx.Exec(`UPDATE rides SET return_station_id=$1, return_dock_id=$2, return_time=$3,
 		fee=$4, status='completed', user_location=$5, fault_type=$6, fault_feedback=$7, distance_km=$8 WHERE id=$9`,
 		req.StationID, dockID, now, fee, req.Location, req.FaultType, req.FaultFeedback, distanceKm, rideID); err != nil {
 		writeErr(w, 500, "结束行程失败")
 		return
+	}
+	// 引导暂停计费时给出调整理由（用户端可见）
+	if feePaused {
+		tx.Exec(`UPDATE rides SET fee_adjust_reason=COALESCE(NULLIF(fee_adjust_reason,''),
+			'您接受了满桩还车引导，费用已在接受引导时暂停计算，步行至推荐站点期间不计费') WHERE id=$1`, rideID)
 	}
 	if _, err := tx.Exec(`UPDATE users SET balance=balance-$1 WHERE id=$2`, fee, u.ID); err != nil {
 		writeErr(w, 500, "扣费失败")
@@ -265,11 +288,15 @@ func myRidesHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	rows, err := db.Query(`
 		SELECT r.id, b.code, s1.name, r.borrow_time, COALESCE(s2.name,''), r.return_time,
 		       COALESCE(r.fee,0), r.status, COALESCE(r.fault_type,''),
-		       EXISTS(SELECT 1 FROM appeals a WHERE a.ride_id=r.id)
+		       EXISTS(SELECT 1 FROM appeals a WHERE a.ride_id=r.id),
+		       r.fee_paused, COALESCE(r.fee_adjust_reason,''), COALESCE(r.fee_adjust_amount,0),
+		       COALESCE((SELECT t.status FROM temp_return_orders t WHERE t.ride_id=r.id ORDER BY t.id DESC LIMIT 1),''),
+		       COALESCE(gs.name,'')
 		FROM rides r
 		JOIN bikes b ON b.id=r.bike_id
 		JOIN stations s1 ON s1.id=r.borrow_station_id
 		LEFT JOIN stations s2 ON s2.id=r.return_station_id
+		LEFT JOIN stations gs ON gs.id=r.guidance_station_id
 		WHERE r.user_id=$1 ORDER BY r.id DESC LIMIT 50`, u.ID)
 	if err != nil {
 		writeErr(w, 500, "查询失败")
@@ -279,20 +306,26 @@ func myRidesHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                          int64
-			bike, from, to, status, ft  string
-			bt                          time.Time
-			rt                          sql.NullTime
-			fee                         float64
-			hasAppeal                   bool
+			id                                    int64
+			bike, from, to, status, ft           string
+			bt                                    time.Time
+			rt                                    sql.NullTime
+			fee, adjustAmount                     float64
+			hasAppeal, feePaused                  bool
+			adjustReason, tempStatus, guideName   string
 		)
-		if err := rows.Scan(&id, &bike, &from, &bt, &to, &rt, &fee, &status, &ft, &hasAppeal); err != nil {
+		if err := rows.Scan(&id, &bike, &from, &bt, &to, &rt, &fee, &status, &ft, &hasAppeal,
+			&feePaused, &adjustReason, &adjustAmount, &tempStatus, &guideName); err != nil {
 			continue
 		}
+		statusName := map[string]string{"ongoing": "进行中", "completed": "已完成", "temp_pending": "临时还车审核中"}[status]
 		out = append(out, map[string]any{
 			"id": id, "bike_code": bike, "from_station": from, "borrow_time": bt,
 			"to_station": to, "return_time": timePtr(rt), "fee": fee, "status": status,
-			"fault_type": ft, "has_appeal": hasAppeal,
+			"status_name": statusName, "fault_type": ft, "has_appeal": hasAppeal,
+			"fee_paused": feePaused, "fee_adjust_reason": adjustReason,
+			"fee_adjust_amount": adjustAmount, "temp_status": tempStatus,
+			"guidance_station_name": guideName,
 		})
 	}
 	writeJSON(w, 200, out)
@@ -309,11 +342,15 @@ func rideDetailHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		bt                             time.Time
 		rt                             sql.NullTime
 		fee                            sql.NullFloat64
+		feePaused                      bool
+		adjustReason                   string
+		adjustAmount                   float64
 	)
 	err := db.QueryRow(`
 		SELECT r.user_id, r.bike_id, b.code, r.status, r.user_location, r.fault_type, r.fault_feedback,
 		       s1.name, COALESCE(s2.name,''), COALESCE(d1.dock_no,0), COALESCE(d2.dock_no,0),
-		       r.borrow_time, r.return_time, r.fee
+		       r.borrow_time, r.return_time, r.fee,
+		       r.fee_paused, COALESCE(r.fee_adjust_reason,''), COALESCE(r.fee_adjust_amount,0)
 		FROM rides r
 		JOIN bikes b ON b.id=r.bike_id
 		JOIN stations s1 ON s1.id=r.borrow_station_id
@@ -321,7 +358,8 @@ func rideDetailHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		LEFT JOIN docks d1 ON d1.id=r.borrow_dock_id
 		LEFT JOIN docks d2 ON d2.id=r.return_dock_id
 		WHERE r.id=$1`, id).Scan(&userID, &bikeID, &bikeCode, &status, &loc, &ft, &ff,
-		&fromName, &toName, &fromDock, &toDock, &bt, &rt, &fee)
+		&fromName, &toName, &fromDock, &toDock, &bt, &rt, &fee,
+		&feePaused, &adjustReason, &adjustAmount)
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "行程不存在")
 		return
@@ -338,6 +376,7 @@ func rideDetailHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		"borrow_station": fromName, "borrow_dock_no": fromDock.Int64, "borrow_time": bt,
 		"return_station": toName, "return_dock_no": toDock.Int64, "return_time": timePtr(rt),
 		"fee": fee.Float64, "user_location": loc, "fault_type": ft, "fault_feedback": ff,
+		"fee_paused": feePaused, "fee_adjust_reason": adjustReason, "fee_adjust_amount": adjustAmount,
 	})
 }
 

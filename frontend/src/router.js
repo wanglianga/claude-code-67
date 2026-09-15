@@ -14,6 +14,7 @@ const routes = [
   { path: '/maintenance', component: () => import('./views/Maintenance.vue'), meta: { staff: true } },
   { path: '/assets', component: () => import('./views/AssetLedger.vue'), meta: { staff: true } },
   { path: '/appeals', component: () => import('./views/Appeals.vue') },
+  { path: '/temp-returns', component: () => import('./views/TempReturns.vue'), meta: { staff: true } },
   { path: '/appeals/:id', component: () => import('./views/AppealDetail.vue') },
   { path: '/stations', component: () => import('./views/Stations.vue'), meta: { staff: true } },
   { path: '/ops', component: () => import('./views/Ops.vue'), meta: { staff: true } },
