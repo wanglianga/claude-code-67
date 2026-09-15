@@ -8,6 +8,7 @@
       <button class="btn sm" :class="filter!=='approved' && 'ghost'" @click="setFilter('approved')">已通过</button>
       <button class="btn sm" :class="filter!=='rejected' && 'ghost'" @click="setFilter('rejected')">已驳回</button>
       <button class="btn sm ghost" @click="setFilter('')">全部</button>
+      <button class="btn sm" style="margin-left:auto" @click="openCreate">＋ 客服生成临时还车单</button>
     </div>
 
     <div class="card">
@@ -75,6 +76,53 @@
         </div>
       </div>
     </div>
+    <!-- 客服生成临时还车单 -->
+    <div v-if="createOpen" class="modal-mask" @click.self="createOpen=false">
+      <div class="modal" style="max-width:620px">
+        <h3>客服生成临时还车处理单</h3>
+        <div class="form-item mb">
+          <label>选择用户进行中行程（满桩无法还车）</label>
+          <select class="input" v-model="cf.ride_id" @change="onPickRide">
+            <option :value="0" disabled>请选择进行中行程</option>
+            <option v-for="r in ongoing" :key="r.ride_id" :value="r.ride_id">
+              {{ r.user_name }}（{{ r.username }}）· {{ r.bike_code }} · 借自 {{ r.borrow_station }} · 已 {{ r.elapsed_min }} 分钟{{ r.overtime ? '（超时）' : '' }}
+            </option>
+          </select>
+          <div v-if="!ongoing.length" class="small muted mt">当前无进行中行程</div>
+        </div>
+        <div class="form-item mb">
+          <label>满桩站点（必须无空桩）</label>
+          <select class="input" v-model.number="cf.full_station_id" @change="cf.station_code = codeOf(cf.full_station_id)">
+            <option :value="0" disabled>请选择</option>
+            <option v-for="s in stations" :key="s.id" :value="s.id">
+              {{ s.name }}（{{ s.code }}）· 空桩 {{ s.free_docks }}{{ s.free_docks === 0 ? ' · 满桩' : '' }}
+            </option>
+          </select>
+        </div>
+        <div class="form-item mb">
+          <label>车辆照片（画面需含站点编号）</label>
+          <input class="input" type="file" accept="image/*" @change="onPhoto" />
+          <div v-if="photoPreview" class="photo-preview">
+            <img :src="photoPreview" alt="车辆照片" />
+            <div class="photo-tag">站点编号 {{ cf.station_code }} · {{ stamp }}</div>
+          </div>
+        </div>
+        <div class="form-item mb">
+          <label>核对站点编号（须与照片、满桩站点一致）</label>
+          <input class="input mono" v-model.trim="cf.station_code" placeholder="如 ST04" />
+        </div>
+        <div class="form-item mb">
+          <label>用户位置</label>
+          <input class="input" v-model="cf.user_location" placeholder="如：万象城西门非机动车围栏停放区" />
+        </div>
+        <div class="small muted mb">提交后行程转为审核中、计费暂停（审核前保持暂停），车辆临时锁定不可借出。</div>
+        <div class="flex">
+          <button class="btn ok" @click="submitCreate"
+            :disabled="!cf.ride_id || !cf.full_station_id || !cf.station_code || !cf.photo_data || !cf.user_location">生成临时处理单</button>
+          <button class="btn ghost" @click="createOpen=false">取消</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -89,18 +137,76 @@ const photo = ref('')
 const reviewItem = ref(null)
 const action = ref('approve')
 const form = ref({ adjust_reason: '', waiver_amount: 0 })
+const ongoing = ref([])
+const stations = ref([])
+const createOpen = ref(false)
+const photoPreview = ref('')
+const stamp = new Date().toLocaleString('zh-CN', { hour12: false })
+const cf = ref({ ride_id: 0, full_station_id: 0, station_code: '', photo_data: '', user_location: '' })
 
 const pendingCount = computed(() => orders.value.filter(o => o.status === 'pending').length)
 const finalFee = computed(() => Math.max(0, (reviewItem.value?.fee_before_pause || 0) - Number(form.value.waiver_amount || 0)))
 
 function badgeOf(s) { return { pending: 'warn', approved: 'ok', rejected: 'danger' }[s] || 'gray' }
 function fmt(t) { return t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '—' }
+function codeOf(id) { const s = stations.value.find(x => x.id === id); return s ? s.code : '' }
 
 async function load() {
   const path = filter.value ? '/temp-returns?status=' + filter.value : '/temp-returns'
   orders.value = await get(path)
 }
 function setFilter(f) { filter.value = f; load().catch(e => toast(e.message, true)) }
+
+async function openCreate() {
+  cf.value = { ride_id: 0, full_station_id: 0, station_code: '', photo_data: '', user_location: '' }
+  photoPreview.value = ''
+  createOpen.value = true
+  try {
+    const [r, s] = await Promise.all([get('/temp-returns/ongoing'), get('/stations')])
+    ongoing.value = r; stations.value = s
+  } catch (e) { toast(e.message, true) }
+}
+function onPickRide() {
+  const r = ongoing.value.find(x => x.ride_id === cf.value.ride_id)
+  if (r) cf.value.user_location = cf.value.user_location || ''
+}
+function onPhoto(ev) {
+  const file = ev.target.files[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    const img = new Image()
+    img.onload = () => {
+      const w = Math.min(640, img.width), scale = w / img.width
+      const h = Math.round(img.height * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w; canvas.height = h
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0, w, h)
+      const code = cf.value.station_code || '----'
+      ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.fillRect(0, h - 46, w, 46)
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif'
+      ctx.fillText('站点编号 ' + code, 12, h - 18)
+      ctx.font = '13px sans-serif'
+      ctx.fillText(new Date().toLocaleString('zh-CN', { hour12: false }), w - 190, h - 20)
+      const url = canvas.toDataURL('image/jpeg', 0.75)
+      cf.value.photo_data = url; photoPreview.value = url
+    }
+    img.src = reader.result
+  }
+  reader.readAsDataURL(file)
+}
+async function submitCreate() {
+  try {
+    const res = await post('/temp-returns', {
+      ride_id: cf.value.ride_id, full_station_id: cf.value.full_station_id,
+      station_code: cf.value.station_code, photo_data: cf.value.photo_data,
+      user_location: cf.value.user_location,
+    })
+    toast(res.message); createOpen.value = false; filter.value = 'pending'; await load()
+  } catch (e) { toast(e.message, true) }
+}
+
 function openReview(o, act) {
   reviewItem.value = o; action.value = act
   form.value = { adjust_reason: '', waiver_amount: act === 'approve' ? o.fee_before_pause : 0 }
@@ -119,4 +225,7 @@ onMounted(() => load().catch(e => toast(e.message, true)))
 
 <style scoped>
 .thumb { width: 78px; height: 58px; object-fit: cover; border-radius: 6px; border: 1px solid #e3e8f0; cursor: zoom-in; }
+.photo-preview { margin-top: 8px; max-width: 320px; border: 1px solid #e3e8f0; border-radius: 8px; overflow: hidden; }
+.photo-preview img { width: 100%; display: block; }
+.photo-tag { background: rgba(0,0,0,.62); color: #fff; font-size: 12px; padding: 4px 8px; }
 </style>

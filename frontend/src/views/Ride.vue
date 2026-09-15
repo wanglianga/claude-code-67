@@ -70,14 +70,14 @@
       </div>
       <div class="flex wrap">
         <button class="btn ok" @click="doReturn" :disabled="!ret.station_id || busy">🔒 还车并锁止</button>
-        <button class="btn" @click="openGuidance" :disabled="busy">🧭 满桩智能推荐还车点</button>
+        <button class="btn" @click="openGuidance(ret.station_id)" :disabled="busy || !ret.station_id">🧭 满桩智能推荐还车点</button>
         <button class="btn ghost" @click="lockStuck" :disabled="busy">🔧 锁具打不开？</button>
       </div>
       <div v-if="fullErr" class="alert warn mt">
         ⚠ {{ fullErr }}
         <div class="flex" style="gap:8px;margin-top:8px">
-          <button class="btn sm" @click="openGuidance">🧭 推荐有空桩的还车点（费用暂停）</button>
-          <button class="btn sm ghost" @click="openTemp(null)">📷 附近都没空桩？申请临时还车</button>
+          <button class="btn sm" @click="openGuidance(fullStationId)">🧭 按该满桩站周边推荐空桩（费用暂停）</button>
+          <button class="btn sm ghost" @click="requestCsTemp">📞 附近都没位？联系客服生成临时还车单</button>
         </div>
       </div>
     </div>
@@ -168,47 +168,10 @@
             </tr>
           </tbody>
         </table>
-        <div v-else class="alert danger" style="display:block">附近站点均无空桩，请申请临时还车。</div>
+        <div v-else class="alert danger" style="display:block">该站周边均无空桩，请联系客服生成临时还车处理单。</div>
         <div class="flex mt">
-          <button class="btn" @click="openTemp(guide)">📷 申请临时还车（客服审核后关闭计费）</button>
+          <button class="btn" @click="requestCsTemp">📞 附近都没空桩？联系客服生成临时还车单</button>
           <button class="btn ghost" @click="guide=null">取消</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 临时还车申请 -->
-    <div v-if="showTempForm" class="modal-mask" @click.self="showTempForm=false">
-      <div class="modal">
-        <h3>临时还车申请</h3>
-        <div class="alert warn mb" style="display:block">
-          附近无空桩时可在合规地点临时锁车。<b>请拍摄包含站点编号的车辆照片</b>并填写位置，客服审核通过后关闭计费；审核期间停止计费。
-        </div>
-        <div class="form-item mb">
-          <label>满桩站点（车辆所在/最近站点）</label>
-          <select class="input" v-model.number="tempForm.full_station_id" @change="tempForm.station_code = codeOf(tempForm.full_station_id)">
-            <option :value="0" disabled>请选择站点</option>
-            <option v-for="s in stations" :key="s.id" :value="s.id">{{ s.name }}（{{ s.code }}）</option>
-          </select>
-        </div>
-        <div class="form-item mb">
-          <label>车辆照片（画面需含站点编号）</label>
-          <input class="input" type="file" accept="image/*" capture="environment" @change="onPhoto" />
-          <div v-if="photoPreview" class="photo-preview">
-            <img :src="photoPreview" alt="车辆照片" />
-            <div class="photo-tag">站点编号 {{ tempForm.station_code }} · {{ nowStamp }}</div>
-          </div>
-        </div>
-        <div class="form-item mb">
-          <label>核对站点编号（须与照片及站点一致）</label>
-          <input class="input mono" v-model.trim="tempForm.station_code" placeholder="如 ST04" />
-        </div>
-        <div class="form-item mb">
-          <label>用户位置</label>
-          <input class="input" v-model="tempForm.user_location" placeholder="如：万象城西门非机动车停放区" />
-        </div>
-        <div class="flex">
-          <button class="btn ok" @click="submitTemp" :disabled="busy || !tempForm.photo_data || !tempForm.station_code || !tempForm.user_location">提交临时还车</button>
-          <button class="btn ghost" @click="showTempForm=false">取消</button>
         </div>
       </div>
     </div>
@@ -256,11 +219,7 @@ const appealRide = ref(null)
 const appealReason = ref('')
 const guide = ref(null)
 const lockedFee = ref(0)
-const showTempForm = ref(false)
-const photoPreview = ref('')
-const tempForm = ref({ full_station_id: 0, station_code: '', photo_data: '', user_location: '' })
 const nowTick = ref(Date.now())
-const nowStamp = new Date().toLocaleString('zh-CN', { hour12: false })
 let tickTimer = null
 
 const ongoing = computed(() => rides.value.find(r => r.status === 'ongoing'))
@@ -282,7 +241,6 @@ const elapsed = computed(() => {
 })
 
 function fmtTime(t) { return new Date(t).toLocaleString('zh-CN', { hour12: false }) }
-function codeOf(id) { const s = stations.value.find(x => x.id === id); return s ? s.code : '' }
 
 async function loadAll() {
   const [s, r, d] = await Promise.all([get('/stations'), get('/rides/my'), get('/dashboard')])
@@ -327,14 +285,21 @@ async function doReturn() {
   } catch (e) {
     if (e.status === 409 && e.data?.error === 'station_full') {
       fullErr.value = e.data.message
+      fullStationId.value = e.data.station_id || ret.value.station_id
     } else { toast(e.message, true) }
   } finally { busy.value = false }
 }
 
-async function openGuidance() {
+async function openGuidance(stationId) {
   if (!ongoing.value) return
-  try { guide.value = await post('/rides/return-guidance', { ride_id: ongoing.value.id }) }
-  catch (e) { toast(e.message, true) }
+  const sid = stationId || ret.value.station_id
+  if (!sid) { toast('请先选择发现满桩的目标站点', true); return }
+  try {
+    guide.value = await post('/rides/return-guidance', { ride_id: ongoing.value.id, station_id: sid })
+  } catch (e) {
+    if (e.status === 409 && e.data?.error === 'station_has_free_dock') toast(e.data.message, true)
+    else toast(e.message, true)
+  }
 }
 async function acceptGuide(s) {
   try {
@@ -347,62 +312,26 @@ async function acceptGuide(s) {
   } catch (e) { toast(e.message, true) }
 }
 
-function openTemp(g) {
+// 附近无空位：用户无权自建临时处理单，需联系客服（一键发起「无法还车」协同事件，客服据此创建临时还车单）
+const fullStationId = ref(0)
+async function requestCsTemp() {
   guide.value = null
-  showTempForm.value = true
-  const fsid = ret.value.station_id || 0
-  tempForm.value = {
-    full_station_id: fsid,
-    station_code: codeOf(fsid),
-    photo_data: '', user_location: ret.value.location || '',
-  }
-  photoPreview.value = ''
-}
-
-function onPhoto(ev) {
-  const file = ev.target.files[0]
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    const img = new Image()
-    img.onload = () => {
-      // 缩放并在照片上叠加站点编号与时间水印，确保“照片包含站点编号”
-      const w = Math.min(640, img.width), scale = w / img.width
-      const h = Math.round(img.height * scale)
-      const canvas = document.createElement('canvas')
-      canvas.width = w; canvas.height = h
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(img, 0, 0, w, h)
-      const code = tempForm.value.station_code || '----'
-      ctx.fillStyle = 'rgba(0,0,0,0.62)'
-      ctx.fillRect(0, h - 46, w, 46)
-      ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif'
-      ctx.fillText('站点编号 ' + code, 12, h - 18)
-      ctx.font = '13px sans-serif'
-      ctx.fillText(new Date().toLocaleString('zh-CN', { hour12: false }), w - 190, h - 20)
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.75)
-      tempForm.value.photo_data = dataUrl
-      photoPreview.value = dataUrl
-    }
-    img.src = reader.result
-  }
-  reader.readAsDataURL(file)
-}
-
-async function submitTemp() {
-  busy.value = true
+  const stationId = fullStationId.value || ret.value.station_id
+  if (!stationId) { toast('请先选择满桩站点', true); return }
+  const stationName = (stations.value.find(s => s.id === stationId) || {}).name || ''
   try {
-    const res = await post('/temp-returns', {
+    const res = await post('/events', {
+      type: 'cannot_return',
+      station_id: stationId,
       ride_id: ongoing.value.id,
-      full_station_id: tempForm.value.full_station_id,
-      station_code: tempForm.value.station_code,
-      photo_data: tempForm.value.photo_data,
-      user_location: tempForm.value.user_location,
+      title: `满桩无法还车，申请客服生成临时还车处理单（${stationName}）`,
     })
-    toast(res.message)
-    showTempForm.value = false
-    await loadAll()
-  } catch (e) { toast(e.message, true) } finally { busy.value = false }
+    await post(`/events/${res.event_id}/messages`, {
+      content: `行程 #${ongoing.value.id}（车辆 ${ongoing.value.bike_code}，借自 ${ongoing.value.from_station}）；满桩站点：${stationName}；用户当前位置：${ret.value.location || '未填写'}。请客服核对含站点编号的车辆照片后创建临时还车处理单。`,
+    })
+    toast('已通知客服，客服将与您核对含站点编号的照片并生成临时还车单，审核期间计费暂停')
+    router.push('/events/' + res.event_id)
+  } catch (e) { toast(e.message, true) }
 }
 
 async function lockStuck() {
@@ -430,8 +359,5 @@ onUnmounted(() => clearInterval(tickTimer))
 
 <style scoped>
 .rec-first { background: #f0fbf4; }
-.photo-preview { margin-top: 8px; position: relative; max-width: 320px; border: 1px solid #e3e8f0; border-radius: 8px; overflow: hidden; }
-.photo-preview img { width: 100%; display: block; }
-.photo-tag { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.62); color: #fff; font-size: 12px; padding: 4px 8px; }
 .adjust-row td { background: #f6faff; }
 </style>

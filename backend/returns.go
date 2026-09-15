@@ -23,24 +23,26 @@ type nearbyStation struct {
 
 const overtimeMinutes = 120 // 超过 2 小时视为超时骑行
 
-// returnGuidanceHandler 用户到站满桩时：按附近空位、步行距离、超时状态、用户信用推荐还车点。
+// returnGuidanceHandler 用户到站满桩时：必须携带实际触发满桩的目标站点，按其周边空位、
+// 步行距离、超时状态、用户信用推荐还车点（不得回退使用借车站）。
 func returnGuidanceHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	var req struct {
-		RideID int64 `json:"ride_id"`
+		RideID    int64 `json:"ride_id"`
+		StationID int64 `json:"station_id"` // 用户实际发现无空桩的目标站点
 	}
-	if err := decodeBody(r, &req); err != nil || req.RideID == 0 {
-		writeErr(w, 400, "参数错误")
+	if err := decodeBody(r, &req); err != nil || req.RideID == 0 || req.StationID == 0 {
+		writeErr(w, 400, "请提供行程与实际满桩的目标站点")
 		return
 	}
 	var (
-		bikeID, borrowStationID int64
-		borrowTime              time.Time
-		status                  string
-		feePaused               bool
+		bikeID     int64
+		borrowTime time.Time
+		status     string
+		feePaused  bool
 	)
-	err := db.QueryRow(`SELECT bike_id, borrow_station_id, borrow_time, status, fee_paused
+	err := db.QueryRow(`SELECT bike_id, borrow_time, status, fee_paused
 		FROM rides WHERE id=$1 AND user_id=$2`, req.RideID, u.ID).
-		Scan(&bikeID, &borrowStationID, &borrowTime, &status, &feePaused)
+		Scan(&bikeID, &borrowTime, &status, &feePaused)
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "行程不存在")
 		return
@@ -52,11 +54,23 @@ func returnGuidanceHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		writeErr(w, 409, "该行程已结束")
 		return
 	}
+	// 以用户实际触发满桩的目标站点为推荐中心，并核验该站确实无空桩
 	var fx, fy float64
 	var fname, fcode string
-	if err := db.QueryRow(`SELECT name, code, location_x, location_y FROM stations WHERE id=$1`, borrowStationID).
-		Scan(&fname, &fcode, &fx, &fy); err != nil {
-		writeErr(w, 500, "查询站点失败")
+	var targetFree, targetCap int
+	if err := db.QueryRow(`SELECT name, code, location_x, location_y, capacity,
+		capacity-(SELECT count(*) FROM docks WHERE station_id=stations.id AND status='occupied')
+		FROM stations WHERE id=$1 AND status='normal'`, req.StationID).
+		Scan(&fname, &fcode, &fx, &fy, &targetCap, &targetFree); err != nil {
+		writeErr(w, 404, "目标站点不存在或已停运")
+		return
+	}
+	if targetFree > 0 {
+		writeJSON(w, 409, map[string]any{
+			"error": "station_has_free_dock",
+			"message": fmt.Sprintf("「%s」当前仍有 %d 个空桩，请直接在该站还车，无需引导", fname, targetFree),
+			"station_id": req.StationID, "free_docks": targetFree,
+		})
 		return
 	}
 
@@ -69,13 +83,13 @@ func returnGuidanceHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		feeAtPause = 1.5
 	}
 
-	// 附近有空桩的站点
+	// 以满桩目标站点为中心，查周边有空桩的站点（满桩站本身 free=0 会被自然排除）
 	rows, err := db.Query(`
 		SELECT z.id, z.name, z.code, z.x, z.y, z.free FROM (
 			SELECT s.id, s.name, s.code, s.location_x AS x, s.location_y AS y,
 			       s.capacity - (SELECT count(*) FROM docks d WHERE d.station_id=s.id AND d.status='occupied') AS free
-			FROM stations s WHERE s.status='normal'
-		) z WHERE z.free > 0 ORDER BY z.id`)
+			FROM stations s WHERE s.status='normal' AND s.id<>$1
+		) z WHERE z.free > 0 ORDER BY z.id`, req.StationID)
 	if err != nil {
 		writeErr(w, 500, "查询附近站点失败")
 		return
@@ -96,30 +110,31 @@ func returnGuidanceHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		ns.WalkMin = int(math.Round(ns.Distance / 0.08)) // 步行约 80m/分钟
 		list = append(list, ns)
 	}
-	// 步行距离优先；超时用户更强调最近，高信用用户优先推荐空位最稳妥站点
+	// 步行距离优先（满桩目标站周边最近的空桩站排前）
 	sort.SliceStable(list, func(i, j int) bool { return list[i].WalkMin < list[j].WalkMin })
 	if len(list) > 5 {
 		list = list[:5]
 	}
 	for i := range list {
-		list[i].Reason = fmt.Sprintf("步行约 %d 分钟（%.1f km），空桩 %d 个", list[i].WalkMin, list[i].Distance, list[i].FreeDocks)
+		list[i].Reason = fmt.Sprintf("距「%s」步行约 %d 分钟（%.1f km），空桩 %d 个", fname, list[i].WalkMin, list[i].Distance, list[i].FreeDocks)
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"ride_id": req.RideID, "full_station": fname, "full_station_code": fcode,
+		"ride_id": req.RideID, "full_station_id": req.StationID,
+		"full_station": fname, "full_station_code": fcode,
 		"elapsed_min": elapsedMin, "overtime": overtime, "credit_score": credit,
 		"fee_now": feeAtPause, "fee_paused": feePaused,
 		"nearby": list, "has_option": len(list) > 0,
 		"tip": func() string {
 			switch {
 			case len(list) == 0:
-				return "附近站点暂无空桩，可申请临时还车（客服审核后关闭计费）"
+				return fmt.Sprintf("「%s」周边站点暂无空桩，请联系客服生成临时还车处理单（审核后关闭计费）", fname)
 			case overtime:
-				return "检测到骑行已超时，建议前往最近空桩站点，接受引导后费用暂停计算"
+				return fmt.Sprintf("检测到骑行已超时，已按「%s」周边最近空桩站点推荐，接受引导后费用暂停计算", fname)
 			case credit >= 90:
-				return "您的信用良好，已为您优先推荐最近的有空桩站点"
+				return fmt.Sprintf("您的信用良好，已按满桩站「%s」周边步行距离优先推荐", fname)
 			default:
-				return "已按步行距离为您推荐附近有空桩的站点"
+				return fmt.Sprintf("已按满桩站「%s」周边步行距离推荐有空桩的站点", fname)
 			}
 		}(),
 	})
@@ -182,7 +197,8 @@ func acceptGuidanceHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	})
 }
 
-// ============================ 临时还车处理单（用户发起 → 客服审核） ============================
+// ============================ 临时还车处理单（客服创建 → 客服审核） ============================
+// 角色门禁：仅客服/运营可创建与审核，普通用户 403（用户只能请求客服协助）。
 
 func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	var req struct {
@@ -192,8 +208,8 @@ func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		PhotoData    string `json:"photo_data"`
 		UserLocation string `json:"user_location"`
 	}
-	if err := decodeBody(r, &req); err != nil || req.RideID == 0 {
-		writeErr(w, 400, "请填写完整信息")
+	if err := decodeBody(r, &req); err != nil || req.RideID == 0 || req.StationID == 0 {
+		writeErr(w, 400, "请填写完整信息（行程、满桩站点、照片、位置）")
 		return
 	}
 	if len(req.PhotoData) < 50 {
@@ -204,16 +220,17 @@ func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		writeErr(w, 400, "请提供用户位置")
 		return
 	}
+	// 客服为用户建单：行程归属按 ride_id 查询，不使用当前登录人
 	var (
-		bikeID, borrowStation int64
-		borrowTime            time.Time
-		status                string
-		alreadyPaused         bool
-		pauseTime             sql.NullTime
+		bikeID, ownerID    int64
+		borrowTime         time.Time
+		status             string
+		alreadyPaused      bool
+		pauseTime          sql.NullTime
 	)
-	err := db.QueryRow(`SELECT bike_id, borrow_station_id, borrow_time, status, fee_paused, fee_pause_time
-		FROM rides WHERE id=$1 AND user_id=$2`, req.RideID, u.ID).
-		Scan(&bikeID, &borrowStation, &borrowTime, &status, &alreadyPaused, &pauseTime)
+	err := db.QueryRow(`SELECT bike_id, user_id, borrow_time, status, fee_paused, fee_pause_time
+		FROM rides WHERE id=$1`, req.RideID).
+		Scan(&bikeID, &ownerID, &borrowTime, &status, &alreadyPaused, &pauseTime)
 	if err == sql.ErrNoRows {
 		writeErr(w, 404, "行程不存在")
 		return
@@ -226,25 +243,29 @@ func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		return
 	}
 	if status != "ongoing" {
-		writeErr(w, 409, "该行程已结束")
+		writeErr(w, 409, "该行程已结束，无法再建临时还车单")
 		return
 	}
-	fullID := req.StationID
-	if fullID == 0 {
-		fullID = borrowStation
-	}
 	var sname, scode string
-	if err := db.QueryRow(`SELECT name, code FROM stations WHERE id=$1`, fullID).Scan(&sname, &scode); err != nil {
+	var stationFree, stationCap int
+	if err := db.QueryRow(`SELECT name, code, capacity,
+		capacity-(SELECT count(*) FROM docks WHERE station_id=stations.id AND status='occupied')
+		FROM stations WHERE id=$1`, req.StationID).Scan(&sname, &scode, &stationCap, &stationFree); err != nil {
 		writeErr(w, 404, "站点不存在")
 		return
 	}
-	// 照片必须包含站点编号：要求用户核对的编号与所选站点一致
+	// 仅满桩（无空桩）站点才允许建临时还车单
+	if stationFree > 0 {
+		writeErr(w, 409, fmt.Sprintf("「%s」仍有 %d 个空桩，请引导用户直接在该站还车，无需创建临时还车单", sname, stationFree))
+		return
+	}
+	// 照片必须包含站点编号：核对编号与满桩站点一致
 	if req.StationCode == "" {
 		writeErr(w, 400, "请填写照片中显示的站点编号")
 		return
 	}
 	if req.StationCode != scode {
-		writeErr(w, 409, fmt.Sprintf("照片站点编号（%s）与所选站点「%s」编号（%s）不一致，请重新拍摄包含站点编号的照片", req.StationCode, sname, scode))
+		writeErr(w, 409, fmt.Sprintf("照片站点编号（%s）与满桩站点「%s」编号（%s）不一致，请使用包含站点编号的照片", req.StationCode, sname, scode))
 		return
 	}
 	mins := int(time.Now().Sub(borrowTime) / time.Minute)
@@ -258,7 +279,7 @@ func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		return
 	}
 	defer tx.Rollback()
-	// 提交即暂停计费（客服审核期间不计费），车辆进入临时锁定（不可再借出，且不计入站点可用车）
+	// 建单即暂停计费（审核前保持暂停），车辆进入临时锁定（不可再借、不占站点可用车）
 	feeBefore := feeNow
 	pauseAt := time.Now()
 	if alreadyPaused && pauseTime.Valid {
@@ -274,14 +295,14 @@ func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 		(ride_id,bike_id,user_id,full_station_id,station_code,photo_data,user_location,status,
 		 overtime,fee_paused,pause_time,fee_before_pause)
 		VALUES($1,$2,$3,$4,$5,$6,$7,'pending',$8,TRUE,$9,$10) RETURNING id`,
-		req.RideID, bikeID, u.ID, fullID, scode, req.PhotoData, req.UserLocation,
+		req.RideID, bikeID, ownerID, req.StationID, scode, req.PhotoData, req.UserLocation,
 		mins > overtimeMinutes, pauseAt, feeBefore).Scan(&orderID)
 	if err != nil {
 		writeErr(w, 500, "创建临时还车单失败")
 		return
 	}
 	tx.Exec(`UPDATE rides SET status='temp_pending', fee_paused=TRUE, fee_pause_time=$1,
-		fee_adjust_reason='临时还车待客服审核，审核期间暂停计费' WHERE id=$2`, pauseAt, req.RideID)
+		fee_adjust_reason='满桩临时还车单待客服审核，审核期间暂停计费' WHERE id=$2`, pauseAt, req.RideID)
 	tx.Exec(`UPDATE bikes SET status='temp_locked', station_id=NULL, lock_status='locked' WHERE id=$1`, bikeID)
 	if err := tx.Commit(); err != nil {
 		writeErr(w, 500, "提交失败")
@@ -289,8 +310,43 @@ func tempReturnCreateHandler(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"ok": true, "order_id": orderID,
-		"message": fmt.Sprintf("临时还车申请已提交（站点 %s，编号 %s），客服审核期间停止计费；审核通过后您可在行程中看到费用调整理由", sname, scode),
+		"message": fmt.Sprintf("已为用户创建临时还车处理单 #%d（满桩站点 %s，编号 %s），计费已暂停，待客服审核后关闭计费", orderID, sname, scode),
 	})
+}
+
+// staffOngoingRidesHandler 客服建单时选择进行中行程（带用户与车辆信息）。
+func staffOngoingRidesHandler(w http.ResponseWriter, r *http.Request, _ *User) {
+	rows, err := db.Query(`
+		SELECT r.id, u.name, u.username, b.code, s.name, r.borrow_time, r.fee_paused
+		FROM rides r
+		JOIN users u ON u.id=r.user_id
+		JOIN bikes b ON b.id=r.bike_id
+		JOIN stations s ON s.id=r.borrow_station_id
+		WHERE r.status='ongoing' ORDER BY r.id DESC LIMIT 100`)
+	if err != nil {
+		writeErr(w, 500, "查询进行中行程失败")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var (
+			id                            int64
+			name, username, bike, station string
+			borrowTime                    time.Time
+			feePaused                     bool
+		)
+		if rows.Scan(&id, &name, &username, &bike, &station, &borrowTime, &feePaused) != nil {
+			continue
+		}
+		mins := int(time.Now().Sub(borrowTime) / time.Minute)
+		out = append(out, map[string]any{
+			"ride_id": id, "user_name": name, "username": username, "bike_code": bike,
+			"borrow_station": station, "borrow_time": borrowTime,
+			"elapsed_min": mins, "overtime": mins > overtimeMinutes, "fee_paused": feePaused,
+		})
+	}
+	writeJSON(w, 200, out)
 }
 
 func tempReturnMyHandler(w http.ResponseWriter, r *http.Request, u *User) {
